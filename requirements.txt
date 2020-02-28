@@ -1,0 +1,15 @@
+cv2
+numpy
+torch>=1.0
+torchvision
+matplotlib
+tensorflow
+tensorboard
+terminaltables
+pillow==6.1
+tqdm
+opencv
+shapely
+colorama
+visdom
+yaml
