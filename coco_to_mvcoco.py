@@ -12,37 +12,70 @@ def change_to_mv_coco(coco_file, separator):
     output["annotations"] = []
 
     imgs = sorted(coco["images"], key=lambda im: im["file_name"].lower())
-    img_group = {k: g for k, g in itertools.groupby(imgs, lambda im: im["file_name"].rsplit(separator, 1)[0])}
+    # img_group contains a dictionary of the form
+    # {
+    #     "common_name_of_image": [imgs]
+    # }
+    img_group = {k: list(g) for k, g in itertools.groupby(imgs, lambda im: im["file_name"].rsplit(separator, 1)[0])}
 
-    cats = [c["id"] for c in coco["categories"]]
+    cats = [c["id"] for c in coco["categories"]]  # List with category ids
 
     local_ann_id = 1
-    for _, g in img_group.items():
+    for k, g in img_group.items():
+        # The objective is to create a list of annotations of the following form
+        # [{
+        #     "id": local id of the annotation,
+        #     "category_id": category id of the annotation
+        #     "views": {
+        #         "A": {
+        #             "segmentation": [],
+        #             "image_id": image id,
+        #             "iscrowd": int,
+        #             "bbox": [],
+        #             "area": float
+        #         },
+        #         "B": { ... }, ...
+        #     }
+        # }, ...
+        # ]
         group_annotation_per_category = {cat: {} for cat in cats}
         for image in g:
-            ext = image['file_name'].rsplit(separator, 1)[1]
-            ext = ext.rsplit('.', 1)[0]
+            suffix = image['file_name'].rsplit(separator, 1)[1]
+            suffix, ext = suffix.rsplit('.', 1)
+            # Getting annotations for the current image
             image_annotations = [a for a in coco["annotations"] if a['image_id'] == image['id']]
             for cat in cats:
-                group_annotation_per_category[cat][ext] = [a for a in image_annotations if a["category_id"] == cat]
+                # group_annotations_per_category is a dictionary with the annotations of a group divided in categories
+                #
+                # {
+                #     cat_id: {
+                #         "A": [annotations],  # A and B are the different views
+                #         "B": [annotations], ...
+                #     }, ...
+                # }
+                group_annotation_per_category[cat][suffix] = [a for a in image_annotations if a["category_id"] == cat]
 
         for c, groups in group_annotation_per_category.items():
-            views = len(groups)
-            lengths = sum([len(cat_anns) for _, cat_anns in groups.items()])
+            views = len(groups)  # groups is a dictionary with the views. views is the number of views in the group
+            lengths = sum([len(cat_anns) for _, cat_anns in groups.items()])  # number of annotations per cat
 
-            if lengths != 0 and lengths != views:
-                print(f"There is more than one object for images in category {c}")
-            else:
-                output_append = {
-                    "id": local_ann_id,
-                    "category_id": c
-                }
-                for v, annotations in groups.items():
-                    del annotations["image_id"]
-                    del annotations["category_id"]
-                    output_append[v] = annotations[0]
+            if lengths != 0:
+                if lengths == views:  # So, for this category, there's only one item in each view
+                    valid_annotation = dict(id=local_ann_id, category_id=c, views={})
+                    local_ann_id += 1
+                    for v, annotations in groups.items():
+                        valid_annotation["views"][v] = annotations
+                    output["annotations"].append(valid_annotation)
+                elif lengths % views == 0:  # In this case there's more than one object of the same cat across all views
+                    n_objects = lengths // views
+                    conflicts = {v: [a["id"] for a in annotations] for v, annotations in groups.items()}
+                    print(f"There are {n_objects} objects in the group {k}. Annotations with conflicts: ")
+                    for v, ann_ids in conflicts.items():
+                        print(f"{v}: {ann_ids}")
+                    print("For the moment, the fix has not been implemented. Try Later")
+                else:
+                    print("There's a problem with the annotation")
 
-                output["annotations"].append(output_append)
     return output
 
 
