@@ -1,5 +1,6 @@
 import collections
 from collections import OrderedDict
+from itertools import  permutations
 
 import torch
 import torch.nn as nn
@@ -49,8 +50,8 @@ class YOLOLayer(nn.Module):
 
         prediction = (
             x.view(num_samples, self.num_anchors, self.num_classes + 5, grid_size, grid_size)
-             .permute(0, 1, 3, 4, 2)
-             .contiguous()
+                .permute(0, 1, 3, 4, 2)
+                .contiguous()
         )
 
         # Get outputs
@@ -135,58 +136,37 @@ class YOLOLayer(nn.Module):
 
 
 # noinspection PyTypeChecker
-class YOLOv3(nn.Module):
+class _YOLOv3(nn.Module):
     """YOLOv3 object detection model"""
 
-    def __init__(self, n_classes, anchors=None, img_size=416):
-        super(YOLOv3, self).__init__()
+    def __init__(self, n_classes, anchors=None, img_size=416, scales=3):
+        super(_YOLOv3, self).__init__()
         self.pretrained_last_layer_wts = [None, None, None]
         self.pretrained_last_layer_bias = [None, None, None]
 
+        self.anchors = anchors
         if anchors is None:
-            anchors = [(10, 13), (16, 30), (33, 23),
-                       (30, 61), (62, 45), (59, 119),
-                       (116, 90), (156, 198), (373, 326)]
+            self.anchors = [(10, 13), (16, 30), (33, 23),
+                            (30, 61), (62, 45), (59, 119),
+                            (116, 90), (156, 198), (373, 326)]
         self.seen = 0
         self.header_info = np.array([0, 0, 0, self.seen, 0], dtype=np.int32)
 
         self.features_extractor = Darknet53()
-        self.anchors_network_s1 = AnchorsConv(1024, 1024)
-        self.anchors_network_s2 = AnchorsConv(768, 512)
-        self.anchors_network_s3 = AnchorsConv(384, 256)
-
-        self.pre_anchors_network_2 = nn.Sequential(
-            OrderedDict([
-                (f"pre_anchors_network2_conv", nn.Conv2d(512, 256, 1, bias=False)),
-                (f"pre_anchors_network2_batch_norm", nn.BatchNorm2d(256, momentum=0.9, eps=1e-5)),
-                (f"pre_anchors_network2_leaky", nn.LeakyReLU(0.1)),
-                (f"pre_anchors_network2_upsample", Upsample(2))
-            ])
-        )
-
-        self.pre_anchors_network_3 = nn.Sequential(OrderedDict([
-            (f"pre_anchors_network3_conv", nn.Conv2d(256, 128, 1, bias=False)),
-            (f"pre_anchors_network3_batch_norm", nn.BatchNorm2d(128, momentum=0.9, eps=1e-5)),
-            (f"pre_anchors_network3_leaky", nn.LeakyReLU(0.1)),
-            (f"pre_anchors_network3_upsample", Upsample(2))
-        ]))
-
-        anchors_per_scale = len(anchors) // 3
-
-        big_anchors = anchors[6:]
-        medium_anchors = anchors[3:6]
-        small_anchors = anchors[:3]
-        self.yolo_layers = nn.ModuleList([
-            YOLOLayer(big_anchors, n_classes, img_size),
-            YOLOLayer(medium_anchors, n_classes, img_size),
-            YOLOLayer(small_anchors, n_classes, img_size)
-        ])
-
-        self.yolo_conv_layers = nn.ModuleList([
-            nn.Conv2d(1024, anchors_per_scale * (n_classes + 5), 1),
-            nn.Conv2d(512, anchors_per_scale * (n_classes + 5), 1),
-            nn.Conv2d(256, anchors_per_scale * (n_classes + 5), 1)
-        ])
+        self.extra_features = nn.ModuleList()
+        self.yolo_conv_layers = nn.ModuleList()
+        self.yolo_layers = nn.ModuleList()
+        self.scales = scales
+        n_anchors = len(self.anchors)
+        for i in range(scales):
+            j = scales - i
+            anchors_in_scale = self.anchors[(j - 1) * n_anchors // scales:j * n_anchors // scales]
+            self.yolo_conv_layers.append(nn.Conv2d(1024 // (2 ** i), n_anchors * (n_classes + 5) // scales, 1))
+            self.yolo_layers.append(YOLOLayer(anchors_in_scale, n_classes, img_size))
+            if i == 0:
+                self.extra_features.append(AnchorsConv(1024, 1024))
+            else:
+                self.extra_features.append(AnchorsConv(3 * 1024 // 2 ** (i + 1), 1024 // 2 ** i, pre=True))
 
     def forward(self, x, targets=None):
         # x is a BxCxWxH tensor and targets is a T'x6 tensor, where T' is the number of targets in the whole batch
@@ -194,38 +174,24 @@ class YOLOv3(nn.Module):
         img_dim = x.shape[3]
         loss = 0
 
-        ftrs = self.features_extractor(x)
+        z = self.features_extractor(x)
+        scale = 1
+        early_xtra_ftrs = None
+        yolo_outputs = []
+        for extra_features_subnet, yolo_conv_layer, yolo_layer in \
+                zip(self.extra_features, self.yolo_conv_layers, self.yolo_layers):
+            xtra_ftrs = extra_features_subnet(z[-scale], early_xtra_ftrs)
+            y = xtra_ftrs[-1]
+            early_xtra_ftrs = xtra_ftrs[-2]
 
-        #  Big yolo conv
-        anchors_net_layers_output1 = self.anchors_network_s1(ftrs[-1])
-        anchors_net_output1 = anchors_net_layers_output1[-1]
-        yolo_outputs_1 = self.yolo_conv_layers[0](anchors_net_output1)
-        yolo_outputs_1, layer_loss = self.yolo_layers[0](yolo_outputs_1, targets, img_dim)
-        loss += layer_loss
+            outputs = yolo_conv_layer(y)
+            outputs, layer_loss = yolo_layer(outputs, targets, img_dim)
+            loss += layer_loss
+            yolo_outputs.append(outputs)
 
-        # Medium yolo conv
-        pre_anchors2_ftrs = self.pre_anchors_network_2(anchors_net_layers_output1[-2])
+            scale += 1
+        yolo_outputs = to_cpu(torch.cat(yolo_outputs, 1))
 
-        pre_anchors2_ftrs = torch.cat([pre_anchors2_ftrs, ftrs[-2]], 1)
-
-        anchors_net_layers_output2 = self.anchors_network_s2(pre_anchors2_ftrs)
-        anchors_net_output2 = anchors_net_layers_output2[-1]
-        yolo_outputs_2 = self.yolo_conv_layers[1](anchors_net_output2)
-        yolo_outputs_2, layer_loss = self.yolo_layers[1](yolo_outputs_2, targets, img_dim)
-        loss += layer_loss
-
-        # Small yolo conv
-        pre_anchors3_ftrs = self.pre_anchors_network_3(anchors_net_layers_output2[-2])
-
-        pre_anchors3_ftrs = torch.cat([pre_anchors3_ftrs, ftrs[-3]], 1)
-
-        anchors_net_layers_output3 = self.anchors_network_s3(pre_anchors3_ftrs)
-        anchors_net_output3 = anchors_net_layers_output3[-1]
-        yolo_outputs_3 = self.yolo_conv_layers[2](anchors_net_output3)
-        yolo_outputs_3, layer_loss = self.yolo_layers[2](yolo_outputs_3, targets, img_dim)
-        loss += layer_loss
-
-        yolo_outputs = to_cpu(torch.cat([yolo_outputs_1, yolo_outputs_2, yolo_outputs_3], 1))
         return yolo_outputs if targets is None else (loss, yolo_outputs)
 
     def load_yolov3_weights(self, weights_path):
@@ -236,6 +202,7 @@ class YOLOv3(nn.Module):
             self.seen = header[3]  # number of images seen during training
             weights = np.fromfile(f, dtype=np.float32)  # The rest are weights
 
+        # Loading weights of Darknet53
         ptr = 0
         ptr = self.load_conv_layer(self.features_extractor.c1[0], ptr, weights, self.features_extractor.c1[1])
         ptr = self.load_conv_layer(self.features_extractor.c2[0], ptr, weights, self.features_extractor.c2[1])
@@ -260,32 +227,18 @@ class YOLOv3(nn.Module):
                 ptr = self.load_conv_layer(residual_block[i], ptr, weights, residual_block[i + 1])
 
         current_ptr = ptr
-        ptr = self.load_conv_layer(self.anchors_network_s1.c1[0], current_ptr, weights, self.anchors_network_s1.c1[1])
-        ptr = self.load_conv_layer(self.anchors_network_s1.c2[0], ptr, weights, self.anchors_network_s1.c2[1])
-        ptr = self.load_conv_layer(self.anchors_network_s1.c3[0], ptr, weights, self.anchors_network_s1.c3[1])
-        ptr = self.load_conv_layer(self.anchors_network_s1.c4[0], ptr, weights, self.anchors_network_s1.c4[1])
-        ptr = self.load_conv_layer(self.anchors_network_s1.c5[0], ptr, weights, self.anchors_network_s1.c5[1])
-        ptr = self.load_conv_layer(self.anchors_network_s1.c6[0], ptr, weights, self.anchors_network_s1.c6[1])
+        # Extra-ftrs layer
+        for extra_feature_layer in self.extra_features:
+            if extra_feature_layer.with_pre:
+                ptr = self.load_conv_layer(extra_feature_layer.pre[0], ptr, weights, extra_feature_layer.pre[1])
+            ptr = self.load_conv_layer(extra_feature_layer.c1[0], current_ptr, weights, extra_feature_layer.c1[1])
+            ptr = self.load_conv_layer(extra_feature_layer.c2[0], ptr, weights, extra_feature_layer.c2[1])
+            ptr = self.load_conv_layer(extra_feature_layer.c3[0], ptr, weights, extra_feature_layer.c3[1])
+            ptr = self.load_conv_layer(extra_feature_layer.c4[0], ptr, weights, extra_feature_layer.c4[1])
+            ptr = self.load_conv_layer(extra_feature_layer.c5[0], ptr, weights, extra_feature_layer.c5[1])
+            ptr = self.load_conv_layer(extra_feature_layer.c6[0], ptr, weights, extra_feature_layer.c6[1])
 
-        ptr += self.yolo_conv_layers[0].bias.numel()
-        ptr = self.load_conv_layer(self.pre_anchors_network_2[0], ptr, weights, self.pre_anchors_network_2[1])
-
-        ptr = self.load_conv_layer(self.anchors_network_s2.c1[0], ptr, weights, self.anchors_network_s2.c1[1])
-        ptr = self.load_conv_layer(self.anchors_network_s2.c2[0], ptr, weights, self.anchors_network_s2.c2[1])
-        ptr = self.load_conv_layer(self.anchors_network_s2.c3[0], ptr, weights, self.anchors_network_s2.c3[1])
-        ptr = self.load_conv_layer(self.anchors_network_s2.c4[0], ptr, weights, self.anchors_network_s2.c4[1])
-        ptr = self.load_conv_layer(self.anchors_network_s2.c5[0], ptr, weights, self.anchors_network_s2.c5[1])
-        ptr = self.load_conv_layer(self.anchors_network_s2.c6[0], ptr, weights, self.anchors_network_s2.c6[1])
-
-        ptr += self.yolo_conv_layers[1].bias.numel()
-        ptr = self.load_conv_layer(self.pre_anchors_network_3[0], ptr, weights, self.pre_anchors_network_3[1])
-
-        ptr = self.load_conv_layer(self.anchors_network_s3.c1[0], ptr, weights, self.anchors_network_s3.c1[1])
-        ptr = self.load_conv_layer(self.anchors_network_s3.c2[0], ptr, weights, self.anchors_network_s3.c2[1])
-        ptr = self.load_conv_layer(self.anchors_network_s3.c3[0], ptr, weights, self.anchors_network_s3.c3[1])
-        ptr = self.load_conv_layer(self.anchors_network_s3.c4[0], ptr, weights, self.anchors_network_s3.c4[1])
-        ptr = self.load_conv_layer(self.anchors_network_s3.c5[0], ptr, weights, self.anchors_network_s3.c5[1])
-        self.load_conv_layer(self.anchors_network_s3.c6[0], ptr, weights, self.anchors_network_s3.c6[1])
+            ptr += self.yolo_conv_layers[0].bias.numel()
 
     @staticmethod
     def load_conv_layer(conv_layer, ptr, weights, bn_layer=None):
@@ -335,3 +288,20 @@ class YOLOv3(nn.Module):
             row_metrics = [formats[metric] % yolo.metrics.get(metric, 0) for yolo in self.yolo_layers]
             metrics += [[metric, *row_metrics]]
         return metrics
+
+
+class MVYOLOv3(_YOLOv3):
+    def __init__(self, n_classes, views=("A", "B"), anchors=None, img_size=416, scales=3):
+        super(MVYOLOv3, self).__init__(n_classes, anchors, img_size, scales)
+        projection_net_keys = permutations(views, r=2)
+        self.projection_conv_layers = nn.ModuleList()
+        self.projection_network = nn.ModuleList()
+        for i in range(scales):
+            j = scales - i
+            anchors_in_scale = self.anchors[(j - 1) * n_anchors // scales:j * n_anchors // scales]
+            self.yolo_conv_layers.append(nn.Conv2d(1024 // (2 ** i), n_anchors * (n_classes + 5) // scales, 1))
+            self.yolo_layers.append(YOLOLayer(anchors_in_scale, n_classes, img_size))
+            if i == 0:
+                self.extra_features.append(AnchorsConv(1024, 1024))
+            else:
+                self.extra_features.append(AnchorsConv(3 * 1024 // 2 ** (i + 1), 1024 // 2 ** i, pre=True))

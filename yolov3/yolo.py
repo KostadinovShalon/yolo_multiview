@@ -275,8 +275,19 @@ class Darknet53(nn.Module):
 
 class AnchorsConv(nn.Module):
 
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, pre=False):
         super(AnchorsConv, self).__init__()
+        self.with_pre = pre
+        self.pre = None
+        if pre:
+            self.pre = nn.Sequential(
+                OrderedDict([
+                    (f"pre_anchors_network2_conv", nn.Conv2d(2 * in_channels // 3, in_channels // 3, 1, bias=False)),
+                    (f"pre_anchors_network2_batch_norm", nn.BatchNorm2d(in_channels // 3, momentum=0.9, eps=1e-5)),
+                    (f"pre_anchors_network2_leaky", nn.LeakyReLU(0.1)),
+                    (f"pre_anchors_network2_upsample", Upsample(2))
+                ])
+            )
         self.c1 = nn.Sequential(
             nn.Conv2d(in_channels, out_channels // 2, 1, bias=False),
             nn.BatchNorm2d(out_channels // 2, momentum=0.9, eps=1e-5),
@@ -313,7 +324,10 @@ class AnchorsConv(nn.Module):
             nn.LeakyReLU(0.1)
         )
 
-    def forward(self, x):
+    def forward(self, x, earlier_ftrs=None):
+        if self.with_pre:
+            earlier_ftrs = self.pre(earlier_ftrs)
+            x = torch.cat([earlier_ftrs, x], 1)
         x = self.c1(x)
         x = self.c2(x)
         x = self.c3(x)
@@ -324,6 +338,8 @@ class AnchorsConv(nn.Module):
         return x_p, x
 
     def apply(self, fn):
+        if self.pre is not None:
+            fn(self.pre)
         fn(self.c1)
         fn(self.c2)
         fn(self.c3)
