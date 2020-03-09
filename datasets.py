@@ -443,9 +443,11 @@ class MVCOCODataset(Dataset):
         Converts a region dict to bounding boxes
         :param anns: lists of anns dictionaries
         :param imgs: original images
-        :return: bounding boxes
+        :return: bounding boxes with format dict, and each view label includes a tensor as a value, with dims:
+                number of annotations x 7 -> (batch_id, ann_id, label, x, y, w, h)
         """
         cat_id = anns["category_id"]
+        ann_id = anns["id"]
         boxes = {}
         for k, view_ann in anns["views"].items():
             img = imgs[k]
@@ -460,7 +462,7 @@ class MVCOCODataset(Dataset):
             view_boxes = None
             if len(view_ann) > 0:
                 number_of_annotations = len(view_ann)
-                view_boxes = torch.zeros((number_of_annotations, 6))
+                view_boxes = torch.zeros((number_of_annotations, 7))
 
                 for c, ann in enumerate(view_ann):
                     bbox = ann["bbox"]
@@ -497,6 +499,7 @@ class MVCOCODataset(Dataset):
                     view_boxes[c, 3] = (y1 + y2) / 2 / padded_h
                     view_boxes[c, 4] = (x2 - x1) * w_factor / padded_w
                     view_boxes[c, 5] = (y2 - y1) * h_factor / padded_h
+                    view_boxes[c, 6] = cat_id
             view_boxes[:, 1] = torch.tensor(list(map(self._actual_indices.get, view_boxes[:, 1].tolist())),
                                             device=view_boxes.device)
             boxes[k] = view_boxes

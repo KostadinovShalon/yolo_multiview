@@ -1,6 +1,7 @@
 import collections
 from collections import OrderedDict
-from itertools import  permutations
+from itertools import permutations
+from typing import Dict
 
 import torch
 import torch.nn as nn
@@ -8,131 +9,7 @@ import numpy as np
 
 from yolov3.utils.boxes import build_targets
 from yolov3.utils.networks import to_cpu
-from yolov3.yolo import Darknet53, AnchorsConv, Upsample
-
-
-class YOLOLayer(nn.Module):
-    """Detection layer"""
-
-    def __init__(self, anchors, num_classes, img_dim=416):
-        super(YOLOLayer, self).__init__()
-        self.anchors = anchors
-        self.num_anchors = len(anchors)
-        self.num_classes = num_classes
-        self.ignore_thres = 0.5
-        self.mse_loss = nn.MSELoss()
-        self.bce_loss = nn.BCELoss()
-        self.ce_loss = nn.CrossEntropyLoss()
-        self.obj_scale = 1
-        self.noobj_scale = 100
-        self.metrics = collections.OrderedDict()
-        self.img_dim = img_dim
-        self.grid_size = 0  # grid size
-        self.stride = self.grid_x = self.grid_y = self.scaled_anchors = self.anchor_w = self.anchor_h = None
-
-    def compute_grid_offsets(self, grid_size, cuda=True):
-        self.grid_size = grid_size
-        g = self.grid_size
-        FloatTensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
-        self.stride = self.img_dim / self.grid_size
-        # Calculate offsets for each grid
-        self.grid_x = torch.arange(g).repeat(g, 1).view([1, 1, g, g]).type(FloatTensor)
-        self.grid_y = torch.arange(g).repeat(g, 1).t().view([1, 1, g, g]).type(FloatTensor)
-        self.scaled_anchors = FloatTensor([(a_w / self.stride, a_h / self.stride) for a_w, a_h in self.anchors])
-        self.anchor_w = self.scaled_anchors[:, 0:1].view((1, self.num_anchors, 1, 1))
-        self.anchor_h = self.scaled_anchors[:, 1:2].view((1, self.num_anchors, 1, 1))
-
-    def forward(self, x, targets=None, img_dim=None):
-
-        self.img_dim = img_dim
-        num_samples = x.size(0)
-        grid_size = x.size(2)
-
-        prediction = (
-            x.view(num_samples, self.num_anchors, self.num_classes + 5, grid_size, grid_size)
-                .permute(0, 1, 3, 4, 2)
-                .contiguous()
-        )
-
-        # Get outputs
-        x = torch.sigmoid(prediction[..., 0])  # Center x
-        y = torch.sigmoid(prediction[..., 1])  # Center y
-        w = prediction[..., 2]  # Width
-        h = prediction[..., 3]  # Height
-        pred_conf = torch.sigmoid(prediction[..., 4])  # Conf
-        pred_cls = torch.sigmoid(prediction[..., 5:])  # Cls pred.
-
-        # If grid size does not match current we compute new offsets
-        if grid_size != self.grid_size:
-            # noinspection PyTypeChecker
-            self.compute_grid_offsets(grid_size, cuda=x.is_cuda)
-
-        # Add offset and scale with anchors
-        pred_boxes = prediction[..., :4].clone().detach()
-        pred_boxes[..., 0] = x.data + self.grid_x
-        pred_boxes[..., 1] = y.data + self.grid_y
-        pred_boxes[..., 2] = torch.exp(w.data) * self.anchor_w
-        pred_boxes[..., 3] = torch.exp(h.data) * self.anchor_h
-
-        output = torch.cat(
-            (
-                pred_boxes.view(num_samples, -1, 4) * self.stride,
-                pred_conf.view(num_samples, -1, 1),
-                pred_cls.view(num_samples, -1, self.num_classes),
-            ),
-            -1,
-        )
-        if targets is None:
-            return output, 0
-        else:
-            iou_scores, class_mask, obj_mask, noobj_mask, tx, ty, tw, th, tcls, tconf = build_targets(
-                pred_boxes=pred_boxes,
-                pred_cls=pred_cls,
-                target=targets,
-                anchors=self.scaled_anchors,
-                ignore_thres=self.ignore_thres,
-            )
-            obj_mask = obj_mask.type(torch.bool)
-            noobj_mask = noobj_mask.type(torch.bool)
-            # Loss : Mask outputs to ignore non-existing objects (except with conf. loss)
-            loss_x = self.mse_loss(x[obj_mask], tx[obj_mask])
-            loss_y = self.mse_loss(y[obj_mask], ty[obj_mask])
-            loss_w = self.mse_loss(w[obj_mask], tw[obj_mask])
-            loss_h = self.mse_loss(h[obj_mask], th[obj_mask])
-            loss_conf_obj = self.bce_loss(pred_conf[obj_mask], tconf[obj_mask])
-            loss_conf_noobj = self.bce_loss(pred_conf[noobj_mask], tconf[noobj_mask])
-            loss_conf = self.obj_scale * loss_conf_obj + self.noobj_scale * loss_conf_noobj
-            loss_cls = self.ce_loss(pred_cls[obj_mask], tcls[obj_mask].argmax(1))
-            total_loss = loss_x + loss_y + loss_w + loss_h + loss_conf + loss_cls
-
-            # Metrics
-            cls_acc = 100 * class_mask[obj_mask].mean()
-            conf_obj = pred_conf[obj_mask].mean()
-            conf_noobj = pred_conf[noobj_mask].mean()
-            conf50 = (pred_conf > 0.5).float()
-            iou50 = (iou_scores > 0.5).float()
-            iou75 = (iou_scores > 0.75).float()
-            detected_mask = conf50 * class_mask * tconf
-            precision = torch.sum(iou50 * detected_mask) / (conf50.sum() + 1e-16)
-            recall50 = torch.sum(iou50 * detected_mask) / (obj_mask.sum() + 1e-16)
-            recall75 = torch.sum(iou75 * detected_mask) / (obj_mask.sum() + 1e-16)
-
-            self.metrics["grid_size"] = grid_size
-            self.metrics["loss"] = to_cpu(total_loss).item()
-            self.metrics["x"] = to_cpu(loss_x).item()
-            self.metrics["y"] = to_cpu(loss_y).item()
-            self.metrics["w"] = to_cpu(loss_w).item()
-            self.metrics["h"] = to_cpu(loss_h).item()
-            self.metrics["conf"] = to_cpu(loss_conf).item()
-            self.metrics["cls"] = to_cpu(loss_cls).item()
-            self.metrics["cls_acc"] = to_cpu(cls_acc).item()
-            self.metrics["recall50"] = to_cpu(recall50).item()
-            self.metrics["recall75"] = to_cpu(recall75).item()
-            self.metrics["precision"] = to_cpu(precision).item()
-            self.metrics["conf_obj"] = to_cpu(conf_obj).item()
-            self.metrics["conf_noobj"] = to_cpu(conf_noobj).item()
-
-            return output, total_loss
+from yolov3.yolo import Darknet53, AnchorsConv, Upsample, YOLOLayer
 
 
 # noinspection PyTypeChecker
@@ -294,14 +171,69 @@ class MVYOLOv3(_YOLOv3):
     def __init__(self, n_classes, views=("A", "B"), anchors=None, img_size=416, scales=3):
         super(MVYOLOv3, self).__init__(n_classes, anchors, img_size, scales)
         projection_net_keys = permutations(views, r=2)
-        self.projection_conv_layers = nn.ModuleList()
-        self.projection_network = nn.ModuleList()
-        for i in range(scales):
-            j = scales - i
-            anchors_in_scale = self.anchors[(j - 1) * n_anchors // scales:j * n_anchors // scales]
-            self.yolo_conv_layers.append(nn.Conv2d(1024 // (2 ** i), n_anchors * (n_classes + 5) // scales, 1))
-            self.yolo_layers.append(YOLOLayer(anchors_in_scale, n_classes, img_size))
-            if i == 0:
-                self.extra_features.append(AnchorsConv(1024, 1024))
-            else:
-                self.extra_features.append(AnchorsConv(3 * 1024 // 2 ** (i + 1), 1024 // 2 ** i, pre=True))
+        self.projection_conv_layers = {}
+        self.projection_network = {}
+        n_anchors = len(self.anchors)
+
+        for permutation in projection_net_keys:
+            self.projection_network[permutation] = nn.ModuleList()
+            self.projection_conv_layers[permutation] = nn.ModuleList()
+
+            for i in range(scales):
+                self.projection_conv_layers[permutation].append(
+                    nn.Conv2d(1024 // (2 ** i), n_anchors * 4 // scales, 1))
+                if i == 0:
+                    self.projection_network[permutation].append(AnchorsConv(1024, 1024))
+                else:
+                    self.projection_network[permutation].append(AnchorsConv(3 * 1024 // 2 ** (i + 1), 1024 // 2 ** i,
+                                                                            pre=True))
+
+
+class MVYOLOLayer(YOLOLayer):
+
+    def __init__(self, anchors, num_classes, scales, views=("A", "B"), img_dim=416):
+        super(MVYOLOLayer, self).__init__(anchors, num_classes, img_dim)
+        self.scales = scales
+        self.views = views
+
+    def forward(self, x: Dict, targets: Dict = None, img_dim=None,
+                projections: Dict = None, ftrs: Dict = None, *args, **kwargs):
+        self.img_dim = img_dim
+        output = {}
+        for view in self.views:
+            base_predictions = x[view]
+            base_targets = targets[view]
+            sv_output, sv_loss = super(MVYOLOLayer, self).forward(base_predictions, base_targets, img_dim)
+
+            if view not in output.keys():
+                output[view] = {}
+            output[view]["predictions"] = sv_output
+
+            other_views = [v for v in self.views if v != view]
+
+            for other_view in other_views:
+                other_view_projections = projections[(view, other_view)]
+                num_samples = other_view_projections.size(0)
+                grid_size = other_view_projections.size(2)
+                # Projected bounding boxes must include local id
+                projection = (
+                    other_view_projections.view(num_samples, self.num_anchors, 5, grid_size, grid_size)
+                        .permute(0, 1, 3, 4, 2)
+                        .contiguous()
+                )
+
+                # Get outputs
+                x = torch.sigmoid(projection[..., 0])  # Center x
+                y = torch.sigmoid(projection[..., 1])  # Center y
+                w = projection[..., 2]  # Width
+                h = projection[..., 3]  # Height
+
+                # Add offset and scale with anchors
+                proj_boxes = projection[..., :4].clone().detach()
+                proj_boxes[..., 0] = x.data + self.grid_x
+                proj_boxes[..., 1] = y.data + self.grid_y
+                proj_boxes[..., 2] = torch.exp(w.data) * self.anchor_w
+                proj_boxes[..., 3] = torch.exp(h.data) * self.anchor_h
+
+                other_view_targets = targets[other_view]
+
