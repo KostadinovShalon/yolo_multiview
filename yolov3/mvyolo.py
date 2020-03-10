@@ -171,22 +171,56 @@ class MVYOLOv3(_YOLOv3):
     def __init__(self, n_classes, views=("A", "B"), anchors=None, img_size=416, scales=3):
         super(MVYOLOv3, self).__init__(n_classes, anchors, img_size, scales)
         projection_net_keys = permutations(views, r=2)
-        self.projection_conv_layers = {}
+        self.views = views
         self.projection_network = {}
+        self.mv_yolo_layers = nn.ModuleList()
+        self.img_size = img_size
         n_anchors = len(self.anchors)
+        for i in range(scales):
+            j = scales - i
+            anchors_in_scale = self.anchors[(j - 1) * n_anchors // scales:j * n_anchors // scales]
+            self.mv_yolo_layers.append(MVYOLOLayer(anchors_in_scale, n_classes, scales, views, img_size))
 
         for permutation in projection_net_keys:
             self.projection_network[permutation] = nn.ModuleList()
             self.projection_conv_layers[permutation] = nn.ModuleList()
+            self.projection_network[permutation] = nn.Sequential(
+                    nn.Linear(4, 128),
+                    nn.ReLU(),
+                    nn.Linear(128, 4),
+                    nn.Sigmoid()
+            )
 
-            for i in range(scales):
-                self.projection_conv_layers[permutation].append(
-                    nn.Conv2d(1024 // (2 ** i), n_anchors * 4 // scales, 1))
-                if i == 0:
-                    self.projection_network[permutation].append(AnchorsConv(1024, 1024))
-                else:
-                    self.projection_network[permutation].append(AnchorsConv(3 * 1024 // 2 ** (i + 1), 1024 // 2 ** i,
-                                                                            pre=True))
+    def forward(self, x, targets=None):
+        yolo_outputs = []
+        scale = 0
+        early_xtra_ftrs = [None] * len(self.views)
+        img_dim = self.img_size
+        for extra_features_subnet, yolo_conv_layer, mv_yolo_layer in \
+                zip(self.extra_features, self.yolo_conv_layers, self.mv_yolo_layers):
+            view_outputs = {}
+            for i, view in enumerate(self.views):
+                img = x[view]
+                img_dim = img.shape[3]
+                z = self.features_extractor(img)
+
+                xtra_ftrs = extra_features_subnet(z[-(scale + 1)], early_xtra_ftrs[i])
+                y = xtra_ftrs[-1]
+                early_xtra_ftrs[i] = xtra_ftrs[-2]
+
+                outputs = yolo_conv_layer(y)
+                view_outputs[view] = outputs
+            yolo_outputs.append(view_outputs)
+            scale += 1
+
+        for yolo_output, mv_yolo_layer in zip(yolo_outputs, self.mv_yolo_layers):
+
+            pred_out = mv_yolo_layer(yolo_output, targets, img_dim)
+            loss += layer_loss
+            yolo_outputs[view]["sv"] = outputs
+            yolo_outputs = to_cpu(torch.cat(yolo_outputs, 1))
+
+        return yolo_outputs if targets is None else (loss, yo
 
 
 class MVYOLOLayer(YOLOLayer):
@@ -196,44 +230,103 @@ class MVYOLOLayer(YOLOLayer):
         self.scales = scales
         self.views = views
 
-    def forward(self, x: Dict, targets: Dict = None, img_dim=None,
-                projections: Dict = None, ftrs: Dict = None, *args, **kwargs):
+    def forward(self, x: Dict, targets: Dict = None, img_dim=None):
         self.img_dim = img_dim
         output = {}
         for view in self.views:
             base_predictions = x[view]
             base_targets = targets[view]
-            sv_output, sv_loss = super(MVYOLOLayer, self).forward(base_predictions, base_targets, img_dim)
+            num_samples = base_predictions.size(0)
+            grid_size = base_predictions.size(2)
 
+            prediction = (
+                base_predictions
+                    .view(num_samples, self.num_anchors, self.num_classes + 5, grid_size, grid_size)
+                    .permute(0, 1, 3, 4, 2)
+                    .contiguous()
+            )
+
+            # Get outputs
+            base_x = torch.sigmoid(prediction[..., 0])  # Center x
+            base_y = torch.sigmoid(prediction[..., 1])  # Center y
+            base_w = prediction[..., 2]  # Width
+            base_h = prediction[..., 3]  # Height
+            pred_conf = torch.sigmoid(prediction[..., 4])  # Conf
+            pred_cls = torch.sigmoid(prediction[..., 5:])  # Cls pred.
+
+            # If grid size does not match current we compute new offsets
+            if grid_size != self.grid_size:
+                # noinspection PyTypeChecker
+                self.compute_grid_offsets(grid_size, cuda=x.is_cuda)
+
+            # Add offset and scale with anchors
+            pred_boxes = prediction[..., :4].clone().detach()
+            pred_boxes[..., 0] = base_x.data + self.grid_x
+            pred_boxes[..., 1] = base_y.data + self.grid_y
+            pred_boxes[..., 2] = torch.exp(base_w.data) * self.anchor_w
+            pred_boxes[..., 3] = torch.exp(base_h.data) * self.anchor_h
+
+            base_output = torch.cat(
+                (
+                    pred_boxes.view(num_samples, -1, 4) * self.stride,
+                    pred_conf.view(num_samples, -1, 1),
+                    pred_cls.view(num_samples, -1, self.num_classes),
+                ),
+                -1,
+            )
             if view not in output.keys():
                 output[view] = {}
-            output[view]["predictions"] = sv_output
+            output[view]["predictions"] = base_output
+            if targets is not None:
+                iou_scores, class_mask, obj_mask, noobj_mask, tx, ty, tw, th, tcls, tconf, pred_boxes_idx = \
+                    build_targets(
+                        pred_boxes=pred_boxes,
+                        pred_cls=pred_cls,
+                        target=base_targets,
+                        anchors=self.scaled_anchors,
+                        ignore_thres=self.ignore_thres,
+                        include_tensor_idx=True
+                    )
+                obj_mask = obj_mask.type(torch.bool)
+                noobj_mask = noobj_mask.type(torch.bool)
+                # Loss : Mask outputs to ignore non-existing objects (except with conf. loss)
+                base_loss_x = self.mse_loss(base_x[obj_mask], tx[obj_mask])
+                base_loss_y = self.mse_loss(base_y[obj_mask], ty[obj_mask])
+                base_loss_w = self.mse_loss(base_w[obj_mask], tw[obj_mask])
+                base_loss_h = self.mse_loss(base_h[obj_mask], th[obj_mask])
+                base_loss_conf_obj = self.bce_loss(pred_conf[obj_mask], tconf[obj_mask])
+                base_loss_conf_noobj = self.bce_loss(pred_conf[noobj_mask], tconf[noobj_mask])
+                base_loss_conf = self.obj_scale * base_loss_conf_obj + self.noobj_scale * base_loss_conf_noobj
+                base_loss_cls = self.ce_loss(pred_cls[obj_mask], tcls[obj_mask].argmax(1))
+                base_total_loss = base_loss_x + base_loss_y + base_loss_w + base_loss_h + base_loss_conf + base_loss_cls
 
-            other_views = [v for v in self.views if v != view]
+                output[view]["sv_loss"] = base_total_loss
+                output[view]["matched_predictions"] = pred_boxes_idx
+                # other_views = [v for v in self.views if v != view]
 
-            for other_view in other_views:
-                other_view_projections = projections[(view, other_view)]
-                num_samples = other_view_projections.size(0)
-                grid_size = other_view_projections.size(2)
-                # Projected bounding boxes must include local id
-                projection = (
-                    other_view_projections.view(num_samples, self.num_anchors, 5, grid_size, grid_size)
-                        .permute(0, 1, 3, 4, 2)
-                        .contiguous()
-                )
-
-                # Get outputs
-                x = torch.sigmoid(projection[..., 0])  # Center x
-                y = torch.sigmoid(projection[..., 1])  # Center y
-                w = projection[..., 2]  # Width
-                h = projection[..., 3]  # Height
-
-                # Add offset and scale with anchors
-                proj_boxes = projection[..., :4].clone().detach()
-                proj_boxes[..., 0] = x.data + self.grid_x
-                proj_boxes[..., 1] = y.data + self.grid_y
-                proj_boxes[..., 2] = torch.exp(w.data) * self.anchor_w
-                proj_boxes[..., 3] = torch.exp(h.data) * self.anchor_h
-
-                other_view_targets = targets[other_view]
-
+                # for other_view in other_views:
+                #     other_view_projections = projections[(view, other_view)]
+                #     num_samples = other_view_projections.size(0)
+                #     grid_size = other_view_projections.size(2)
+                #     # Projected bounding boxes must include local id
+                #     projection = (
+                #         other_view_projections.view(num_samples, self.num_anchors, 5, grid_size, grid_size)
+                #             .permute(0, 1, 3, 4, 2)
+                #             .contiguous()
+                #     )
+                #
+                #     # Get outputs
+                #     x = torch.sigmoid(projection[..., 0])  # Center x
+                #     y = torch.sigmoid(projection[..., 1])  # Center y
+                #     w = projection[..., 2]  # Width
+                #     h = projection[..., 3]  # Height
+                #
+                #     # Add offset and scale with anchors
+                #     proj_boxes = projection[..., :4].clone().detach()
+                #     proj_boxes[..., 0] = x.data + self.grid_x
+                #     proj_boxes[..., 1] = y.data + self.grid_y
+                #     proj_boxes[..., 2] = torch.exp(w.data) * self.anchor_w
+                #     proj_boxes[..., 3] = torch.exp(h.data) * self.anchor_h
+                #
+                #     other_view_targets = targets[other_view]
+        return output

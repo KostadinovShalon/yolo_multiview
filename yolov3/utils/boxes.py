@@ -167,7 +167,6 @@ def build_targets(pred_boxes: torch.Tensor, pred_cls: torch.Tensor, target: torc
     ty = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
     tw = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
     th = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
-    t_idx = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
     tcls = float_tensor(n_b, n_a, n_g, n_g, n_c).fill_(0)
 
     # Convert to position relative to box
@@ -194,7 +193,6 @@ def build_targets(pred_boxes: torch.Tensor, pred_cls: torch.Tensor, target: torc
     # Coordinates
     tx[b, best_n, gj, gi] = gx - gx.floor()
     ty[b, best_n, gj, gi] = gy - gy.floor()
-    t_idx[b, best_n, gj, gi] = target_indices
     # Width and height
     tw[b, best_n, gj, gi] = torch.log(gw / anchors[best_n][:, 0] + 1e-16)
     th[b, best_n, gj, gi] = torch.log(gh / anchors[best_n][:, 1] + 1e-16)
@@ -203,92 +201,13 @@ def build_targets(pred_boxes: torch.Tensor, pred_cls: torch.Tensor, target: torc
     # Compute label correctness and iou at best anchor
     class_mask[b, best_n, gj, gi] = (pred_cls[b, best_n, gj, gi].argmax(-1) == target_labels).float()
     iou_scores[b, best_n, gj, gi] = bbox_iou(pred_boxes[b, best_n, gj, gi], target_boxes, x1y1x2y2=False)
+    indexed_pred_boxes = torch.cat((pred_boxes[b, best_n, gj, gi], target_indices.float(), gi, gj), 1)
 
     t_conf = obj_mask.float()
     if not include_tensor_idx:
         return iou_scores, class_mask, obj_mask, noobj_mask, tx, ty, tw, th, tcls, t_conf
     else:
-        return iou_scores, class_mask, obj_mask, noobj_mask, tx, ty, tw, th, tcls, t_conf, t_idx
-
-
-def build_mv_targets(original_view_pred_boxes: torch.Tensor,
-                     pred_cls: torch.Tensor,
-                     proj_boxes: torch.Tensor,
-                     original_view_targets: torch.Tensor,
-                     other_view_targets: torch.Tensor,
-                     anchors: torch.Tensor):
-    """
-    Gets the masks for the actual targets in the channel with the best suited anchor box. It also gets a mask
-    where there is no predicted object. However, if a "no best anchor" channel has a bigger IOU than the
-    specified anchor, it is also considered an object (thus, the no obj mask gets to 0 for that anchor channel).
-    :param original_view_pred_boxes: predicted boxes, containing the id, x, y, w and h values in that order.
-                       It must be a tensor with the following dimensions: samples x anchors x grid_w x grid_h x 5
-    :param pred_cls: predicted classes tensor, with dimensions: samples x anchors x grid_w x grid_h x classes
-    :param proj_boxes: projected boxes, containing the local_id, target_id, x, y, w and h values in that order.
-                       It must be a tensor with the following dimensions: samples x anchors x grid_w x grid_h x 6
-    :param original_view_targets: actual targets tensor, with dimensions: target_boxes x 7.
-                    The second dimensions of 6-dim vector with the following values: (idx, label, X, Y, W, H, ann_id)
-    :param other_view_targets: actual targets tensor on the other view, with dimensions: target_boxes x 7.
-                    The second dimensions of 6-dim vector  with the following values: (idx, label, X, Y, W, H, ann_id)
-    :param anchors: anchors tensor, with dimensions: anchors x 2. The second dimensions are the width and height.
-    :return: a tuple with the following values:
-            - IOU scores: tensor with dimensions samples x anchors x grid_w x grid_h with the IOU scores of the
-                            predicted boxes only in the best anchor channel
-            - Target x: tensor with dimensions samples x anchors x grid_w x grid_h with the target x value only
-                        for those grid elements (and anchor channels) where the box was found.
-            - Target y: tensor with dimensions samples x anchors x grid_w x grid_h with the target y value only
-                        for those grid elements (and anchor channels) where the box was found.
-            - Target w: tensor with dimensions samples x anchors x grid_w x grid_h with the target w value only
-                        for those grid elements (and anchor channels) where the box was found.
-            - Target h: tensor with dimensions samples x anchors x grid_w x grid_h with the target h value only
-                        for those grid elements (and anchor channels) where the box was found.
-            - Target confidence score: tensor with dimensions samples x anchors x grid_w x grid_h
-                        with the target x value with the confidence score. It has the same value for the obj mask but
-                        with float type.
-    """
-
-    byte_tensor = torch.cuda.ByteTensor if original_view_pred_boxes.is_cuda else torch.ByteTensor
-    float_tensor = torch.cuda.FloatTensor if original_view_pred_boxes.is_cuda else torch.FloatTensor
-
-    n_b = original_view_pred_boxes.size(0)  # Batch dimension
-    n_c = pred_cls.size(-1)  # Cls dim
-    n_a = original_view_pred_boxes.size(1)  # Anchors dimension
-    n_g = original_view_pred_boxes.size(2)  # Grid dimension
-    tcls = float_tensor(n_b, n_a, n_g, n_g, n_c).fill_(0)
-
-    # Output tensors
-    obj_mask = byte_tensor(n_b, n_a, n_g, n_g).fill_(0)  # Mask to indicate the proper object location
-    original_iou_scores = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
-    original_tx = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
-    original_ty = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
-    original_tw = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
-    original_th = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
-
-    # Convert to position relative to box
-    original_target_boxes = original_view_targets[:, 2:6] * n_g
-    original_gxy = original_target_boxes[:, :2]
-    original_gwh = original_target_boxes[:, 2:]
-    # Get anchors with best iou
-    ious = torch.stack([bbox_wh_iou(anchor, original_gwh) for anchor in anchors])
-    best_ious, best_n = ious.max(0)  # best_n indicated the best anchor suited for this task
-    # Separate target values
-    b, target_labels = original_view_targets[:, :2].long().t()
-    original_gx, original_gy = original_gxy.t()
-    original_gw, original_gh = original_gwh.t()
-    original_gi, original_gj = original_gxy.long().t()
-    # Set masks
-    obj_mask[b, best_n, original_gj, original_gi] = 1
-
-    # Coordinates
-    original_tx[b, best_n, original_gj, original_gi] = original_gx - original_gx.floor()
-    original_ty[b, best_n, original_gj, original_gi] = original_gy - original_gy.floor()
-    # Width and height
-    original_tw[b, best_n, original_gj, original_gi] = torch.log(original_gw / anchors[best_n][:, 0] + 1e-16)
-    original_th[b, best_n, original_gj, original_gi] = torch.log(original_gh / anchors[best_n][:, 1] + 1e-16)
-
-    original_iou_scores[b, best_n, original_gj, original_gi] = bbox_iou(original_view_pred_boxes[b, best_n, original_gj, original_gi], original_target_boxes, x1y1x2y2=False)
-
-    return iou_scores, obj_mask, tx, ty, tw, th
+        return iou_scores, class_mask, obj_mask, noobj_mask, tx, ty, tw, th, tcls, t_conf, indexed_pred_boxes
 
 
 def non_max_suppression(prediction, conf_thres=0.5, nms_thres=0.4):

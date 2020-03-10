@@ -499,7 +499,7 @@ class MVCOCODataset(Dataset):
                     view_boxes[c, 3] = (y1 + y2) / 2 / padded_h
                     view_boxes[c, 4] = (x2 - x1) * w_factor / padded_w
                     view_boxes[c, 5] = (y2 - y1) * h_factor / padded_h
-                    view_boxes[c, 6] = cat_id
+                    view_boxes[c, 6] = ann_id
             view_boxes[:, 1] = torch.tensor(list(map(self._actual_indices.get, view_boxes[:, 1].tolist())),
                                             device=view_boxes.device)
             boxes[k] = view_boxes
