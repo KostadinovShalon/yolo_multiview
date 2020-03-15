@@ -201,7 +201,10 @@ def build_targets(pred_boxes: torch.Tensor, pred_cls: torch.Tensor, target: torc
     # Compute label correctness and iou at best anchor
     class_mask[b, best_n, gj, gi] = (pred_cls[b, best_n, gj, gi].argmax(-1) == target_labels).float()
     iou_scores[b, best_n, gj, gi] = bbox_iou(pred_boxes[b, best_n, gj, gi], target_boxes, x1y1x2y2=False)
-    indexed_pred_boxes = torch.cat((pred_boxes[b, best_n, gj, gi], target_indices.float(), gi, gj), 1)
+    indexed_pred_boxes = torch.cat((pred_boxes[b, best_n, gj, gi] / n_g,
+                                    target_indices.unsqueeze(1),
+                                    gi.float().unsqueeze(1),
+                                    gj.float().unsqueeze(1)), 1)
 
     t_conf = obj_mask.float()
     if not include_tensor_idx:
@@ -251,3 +254,16 @@ def non_max_suppression(prediction, conf_thres=0.5, nms_thres=0.4):
             output[image_i] = torch.stack(keep_boxes)
 
     return output
+
+
+def remove_not_projected_boxes(predicted_boxes, projected_boxes, jaccard=0.5):
+    valid_predicted_boxes = []
+
+    for predicted_box in predicted_boxes:
+        projection_overlaps = bbox_iou(predicted_box[:4].unsqueeze(0), projected_boxes[:, :4], x1y1x2y2=False) > jaccard
+        label_match = predicted_box[-1] == projected_boxes[:, -1]
+
+        valid_overlap = projection_overlaps & label_match
+        if len(projected_boxes[valid_overlap]) > 0:
+            valid_predicted_boxes.append(predicted_box)
+    return torch.stack(valid_predicted_boxes) if len(valid_predicted_boxes) > 0 else None

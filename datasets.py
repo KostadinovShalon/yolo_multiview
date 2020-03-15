@@ -423,8 +423,8 @@ class MVCOCODataset(Dataset):
             total_anns = len(self.mv_anns)
             total_partition_val = int(total_anns * val_split)
 
-            self.mv_anns = self.total_anns[:total_partition_val] if partition == "val" \
-                else self.total_anns[total_partition_val:]
+            self.mv_anns = self.mv_anns[:total_partition_val] if partition == "val" \
+                else self.mv_anns[total_partition_val:]
 
         self.img_size = img_size
         self.multiscale = multiscale
@@ -536,27 +536,29 @@ class MVCOCODataset(Dataset):
         #
         return imgs, targets
 
-    def collate_fn(self, batch) -> Dict:
+    def collate_fn(self, batch) -> Tuple[Dict, Dict]:
         if self.multiscale and self.batch_count % 10 == 0:
             self.img_size = random.choice(range(self.min_size, self.max_size + 1, 32))
         imgs, targets = list(zip(*batch))  # These are lists of dictionaries
-        output = {}
+        out_images = {}
+        out_targets = {}
         for i, (img, target) in enumerate(zip(imgs, targets)):
             # img and target are dictionaries with the form of __getitem__ output
             for k, im in img.items():
                 ann = target[k]
-                if k not in output.keys():
-                    output[k] = {"images": [], "targets": []}
-                output[k]["images"].append(im)
+                if k not in out_images.keys():
+                    out_images[k] = []
+                    out_targets[k] = []
+                out_images[k].append(im)
                 if ann is not None:
                     ann[:, 0] = i
-                    output[k]["targets"].append(ann)
-        for k in output.keys():
-            output[k]["targets"] = torch.cat(output[k]["targets"], 0)
-            output[k]["images"] = torch.stack([resize(img, self.img_size) for img in output[k]["images"]])
+                    out_targets[k].append(ann)
+        for k in out_images.keys():
+            out_targets[k] = torch.cat(out_targets[k], 0)
+            out_images[k] = torch.stack([resize(img, self.img_size) for img in out_images[k]])
 
         self.batch_count += 1
-        return output
+        return out_images, out_targets
 
     def __len__(self):
         return len(self.mv_anns)
