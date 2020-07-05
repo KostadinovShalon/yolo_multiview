@@ -71,9 +71,9 @@ def ap_per_class(tp: List, conf: List, pred_cls: List, target_cls: List):
     Source: https://github.com/rafaelpadilla/Object-Detection-Metrics.
 
     :param tp:    True positives (list).
-    :param conf:  Objectness value from 0-1 (list).
-    :param pred_cls: Predicted object classes (list).
-    :param target_cls: True object classes (list).
+    :paramn conf:  Objectness value from 0-1 (list).
+    :paramn pred_cls: Predicted object classes (list).
+    :paramn target_cls: True object classes (list).
     :returns: The average precision as computed in py-faster-rcnn.
     """
 
@@ -82,7 +82,7 @@ def ap_per_class(tp: List, conf: List, pred_cls: List, target_cls: List):
     tp, conf, pred_cls = tp[i], conf[i], pred_cls[i]
 
     # Find unique classes
-    unique_classes = np.unique(target_cls)
+    unique_classes = np.sort(np.unique(target_cls))
 
     # Create Precision-Recall curve and compute AP for each class
     ap, p, r = [], [], []
