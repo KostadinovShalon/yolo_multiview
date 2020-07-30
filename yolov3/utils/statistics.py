@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Union
 
 import tqdm
 
@@ -66,14 +66,14 @@ def get_batch_statistics_from_annotations(predictions, targets, iou_threshold):
     return batch_metrics
 
 
-def ap_per_class(tp: List, conf: List, pred_cls: List, target_cls: List):
+def ap_per_class(tp: List, conf: Union[List, np.array], pred_cls: List, target_cls: List):
     """ Compute the average precision, given the recall and precision curves.
     Source: https://github.com/rafaelpadilla/Object-Detection-Metrics.
 
     :param tp:    True positives (list).
-    :paramn conf:  Objectness value from 0-1 (list).
-    :paramn pred_cls: Predicted object classes (list).
-    :paramn target_cls: True object classes (list).
+    :param conf:  Objectness value from 0-1 (list).
+    :param pred_cls: Predicted object classes (list).
+    :param target_cls: True object classes (list).
     :returns: The average precision as computed in py-faster-rcnn.
     """
 
@@ -89,7 +89,7 @@ def ap_per_class(tp: List, conf: List, pred_cls: List, target_cls: List):
     for c in tqdm.tqdm(unique_classes, desc="Computing AP"):
         i = pred_cls == c
         n_gt = (target_cls == c).sum()  # Number of ground truth objects
-        n_p = i.sum()  # Number of predicted objects
+        n_p = np.sum(i)  # Number of predicted objects
 
         if n_p == 0 and n_gt == 0:
             continue
@@ -144,4 +144,3 @@ def compute_ap(recall, precision):
     # and sum (\Delta recall) * prec
     ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])
     return ap
-

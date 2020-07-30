@@ -44,7 +44,6 @@ def is_file(filename):
     return os.path.isfile(filename)
 
 
-# noinspection PyTypeChecker
 def _get_annotations(json_file):
     """
     Gets the annotations from a VGG Json File
@@ -68,7 +67,8 @@ class _COCODataset(Dataset):
                  partition=None,
                  val_split=0.2,
                  seed=None,
-                 padding_value=1):
+                 padding_value=1,
+                 views=None):
         """
         Dataset for coco-annotated data
 
@@ -90,10 +90,6 @@ class _COCODataset(Dataset):
         self.class_indices.sort()
         self.classes = [self.classes[c] for c in self.class_indices]
 
-        self.imgs = self._get_images()
-        self.anns = self._get_annotations()
-        self._split()
-
         self.img_size = img_size
         self.augment = augment
         self.multiscale = multiscale
@@ -105,7 +101,11 @@ class _COCODataset(Dataset):
         self.partition = partition
         self.val_split = val_split
         self.seed = seed
-        # self.wts = self._get_class_weights()
+        self.views = views
+
+        self.imgs = self._get_images()
+        self.anns = self._get_annotations()
+        self._split()
 
     def _get_images(self):
         return [{"id": int(img['id']),
@@ -181,8 +181,8 @@ class _COCODataset(Dataset):
                 boxes[c, 3] = (y1 + y2) / 2 / padded_h
                 boxes[c, 4] = (x2 - x1) * w_factor / padded_w
                 boxes[c, 5] = (y2 - y1) * h_factor / padded_h
-        boxes[:, 1] = torch.tensor(list(map(self.class_indices.index, boxes[:, 1].tolist())),
-                                   device=boxes.device)
+            boxes[:, 1] = torch.tensor(list(map(self.class_indices.index, boxes[:, 1].tolist())),
+                                       device=boxes.device)
         return img, boxes
 
     def collate_fn(self, batch):
@@ -198,6 +198,9 @@ class _COCODataset(Dataset):
         imgs = torch.stack([resize(img, self.img_size) for img in imgs])
         self.batch_count += 1
         return img_paths, img_ids, imgs, targets
+
+    def __len__(self):
+        return len(self.imgs)
 
 
 class COCODataset(_COCODataset):
@@ -230,9 +233,8 @@ class COCODataset(_COCODataset):
         (and not including extension)
         """
         super().__init__(root, annotations_file, img_size, augment, multiscale, normalized_labels, partition,
-                         val_split, seed, padding_value)
+                         val_split, seed, padding_value, views)
         self.wts = self._get_class_weights()
-        self.views = views
 
     def _get_images(self):
         if self.views:
@@ -248,7 +250,7 @@ class COCODataset(_COCODataset):
         for ann in self.anns:
             cat = ann['category_id']
             wts[self.class_indices.index(cat)] += 1
-        wts = [sum(f for f in wts if f != w) / w for w in wts]
+        wts = [sum(f for f in wts if f != w) / w if w != 0 else 0 for w in wts]
         return wts
 
     def __getitem__(self, index: int):
@@ -275,7 +277,10 @@ class COCODataset(_COCODataset):
             if boxes is not None:
                 boxes[:, 0] = i
         targets = [boxes for boxes in targets if boxes is not None]
-        targets = torch.cat(targets, 0)
+        if len(targets) > 0:
+            targets = torch.cat(targets, 0)
+        else:
+            targets = torch.empty((0, 6))
         if self.multiscale and self.batch_count % 10 == 0:
             self.img_size = random.choice(range(self.min_size, self.max_size + 1, 32))
 
@@ -296,8 +301,7 @@ class MVCOCODataset(_COCODataset):
                  seed=None,
                  padding_value=0):
         super().__init__(root, annotations_file, img_size, False, multiscale, normalized_labels, partition,
-                         val_split, seed, padding_value)
-        self.views = views
+                         val_split, seed, padding_value, views)
 
     def _get_images(self):
         return self._coco_file["images"]
@@ -335,7 +339,8 @@ class MVCOCODataset(_COCODataset):
                 view_ann["category_id"] = ann["category_id"]
             view_img, view_boxes = super().anns_to_bounding_boxes(view_anns, img)
             imgs[i] = view_img
-            boxes[:, i, :] = view_boxes
+            if view_boxes is not None:
+                boxes[:, i, :] = view_boxes
         """
         imgs is a list of padded imgs
         boxes is a N x V x 6 tensor or None

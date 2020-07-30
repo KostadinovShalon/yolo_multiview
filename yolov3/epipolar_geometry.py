@@ -7,16 +7,18 @@ from skimage.measure import ransac
 from skimage.transform import FundamentalMatrixTransform
 import argparse
 import json
-from scipy.stats import norm
 from matplotlib import cm
 
 
-def get_src_and_dst_points(coco, src_view, dst_view, add_padding=True, img_size=None, with_id=False):
+def get_src_and_dst_points(coco, src_view, dst_view, add_padding=True, img_size=None, with_id=False, class_id=None):
     dst = []
     src = []
     ids = []
 
     for ann in coco['annotations']:
+        if class_id is not None:
+            if ann["category_id"] != class_id:
+                continue
         if src_view in ann["views"] and dst_view in ann["views"]:
             image_id = ann["image_group_id"]
             ids.append(image_id)
@@ -45,6 +47,8 @@ def get_src_and_dst_points(coco, src_view, dst_view, add_padding=True, img_size=
                 bbox_src = bbox_src[0] / src_padded_w * img_size, bbox_src[1] / src_padded_h * img_size
             dst.append(bbox_dst)
             src.append(bbox_src)
+    src = np.array(src)
+    dst = np.array(dst)
     if with_id:
         return src, dst, ids
     return src, dst
@@ -58,19 +62,31 @@ def get_eplilines(src_preds, f):
     return epilines.transpose()
 
 
-def compute_fundamental_matrix(coco, src_view, dst_view, img_size=None):
+def compute_fundamental_matrix(coco, src_view, dst_view, img_size=None, class_id=None):
 
-    src, dst = get_src_and_dst_points(coco, src_view, dst_view, add_padding=True, img_size=img_size)
+    src, dst = get_src_and_dst_points(coco, src_view, dst_view, add_padding=True, img_size=img_size, class_id=class_id)
 
     Ft, _ = ransac((src, dst), FundamentalMatrixTransform, min_samples=8,
                    residual_threshold=1, max_trials=5000)
     f = Ft.params
-    error, std = compute_error(coco, f, src_view, dst_view)
+    error, std = compute_error_not_signed(coco, f, src_view, dst_view, img_size, class_id)
     return f, error, std
 
 
-def compute_error(coco, fundamental_matrix, src_view, dst_view):
-    src, dst = get_src_and_dst_points(coco, src_view, dst_view)
+def compute_error(coco, fundamental_matrix, src_view, dst_view, img_size, class_id=None):
+    src, dst = get_src_and_dst_points(coco, src_view, dst_view, img_size=img_size, class_id=class_id)
+    distances = []
+    for src_point, dst_point in zip(src, dst):
+        epiline = epipolar_line(np.concatenate((src_point, [1])), fundamental_matrix)
+        A, B, C = epiline[0], epiline[1], epiline[2]
+        d = (A * dst_point[0] + B * dst_point[1] + C) / np.sqrt(A ** 2 + B ** 2)
+        distances.append(d)
+
+    return np.mean(distances), np.std(distances)
+
+
+def compute_error_not_signed(coco, fundamental_matrix, src_view, dst_view, img_size, class_id=None):
+    src, dst = get_src_and_dst_points(coco, src_view, dst_view, img_size=img_size, class_id=class_id)
     distances = []
     for src_point, dst_point in zip(src, dst):
         epiline = epipolar_line(np.concatenate((src_point, [1])), fundamental_matrix)
@@ -78,7 +94,7 @@ def compute_error(coco, fundamental_matrix, src_view, dst_view):
         d = np.abs(A * dst_point[0] + B * dst_point[1] + C) / np.sqrt(A ** 2 + B ** 2)
         distances.append(d)
 
-    return norm.fit(distances)
+    return 0, sum(xi ** 2 for xi in distances) / len(distances)
 
 
 def epipolar_line(point, fundamental_matrix, im_width=None):

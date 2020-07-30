@@ -4,7 +4,7 @@ import tqdm
 from PIL import Image
 from torch.utils.data import DataLoader
 
-from yolov3.utils.boxes import xywh2xyxy, non_max_suppression, rescale_boxes, mv_non_max_suppression, mv_filtering
+from yolov3.utils.boxes import xywh2xyxy, non_max_suppression, rescale_boxes, mv_filtering
 from yolov3.utils.statistics import get_batch_statistics, ap_per_class
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -57,7 +57,7 @@ def evaluate_singleview(dataset, model, iou_thres, conf_thres, nms_thres, img_si
                         detections.append({
                             "image_id": img_id,
                             "file_name": img_path.rsplit('/', 1)[1],
-                            "category_id": dataset._c[int(d[-1])],
+                            "category_id": dataset.class_indices[int(d[-1])],
                             "bbox": [d[0], d[1], d[2] - d[0], d[3] - d[1]],
                             "score": d[-2]
                         })
@@ -74,7 +74,7 @@ def evaluate_singleview(dataset, model, iou_thres, conf_thres, nms_thres, img_si
         return evaluation_loss, p, r, ap, f1, ap_class
 
 
-def evaluate_multiview(dataset, model, iou_thres, conf_thres, weak_conf_thres, nms_thres, img_size,
+def evaluate_multiview(dataset, model, iou_thres, conf_thres, weak_conf_thres, nms_thres, img_size, score_th,
                        workers, f_matrices, views, bs=1, return_detections=False):
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=bs, shuffle=False,
@@ -90,11 +90,6 @@ def evaluate_multiview(dataset, model, iou_thres, conf_thres, weak_conf_thres, n
     for batch_i, (img_paths, img_ids, imgs, targets) in enumerate(tqdm.tqdm(dataloader, desc="Detecting objects")):
         view_outputs = {v: None for v in views}
         imgs, targets = imgs.to(device), targets.to(device)
-        if ('/home/brian/Documents/datasets/new_smith_full/images/BAGGAGE_20140121_101919_68622_A.jpg',
-            '/home/brian/Documents/datasets/new_smith_full/images/BAGGAGE_20140121_101919_68622_B.jpg',
-            '/home/brian/Documents/datasets/new_smith_full/images/BAGGAGE_20140121_101919_68622_C.jpg',
-            '/home/brian/Documents/datasets/new_smith_full/images/BAGGAGE_20140121_101919_68622_D.jpg') in img_paths:
-            x = 22
         for i, v in enumerate(views):
             view_imgs = imgs[:, i, ...]
             view_imgs.requires_grad = False
@@ -108,8 +103,7 @@ def evaluate_multiview(dataset, model, iou_thres, conf_thres, weak_conf_thres, n
                 view_targets[:, 2:] *= img_size
 
         view_outputs = mv_filtering(view_outputs, f_matrices, conf_thres=conf_thres,
-                                              weak_conf_thres=weak_conf_thres,
-                                              nms_thres=nms_thres)
+                                    nms_thres=nms_thres, score_th=score_th)
         for i, v in enumerate(views):
             if targets.shape[0] > 0:
                 sample_metrics += get_batch_statistics(view_outputs[v], targets[:, i, :].cpu(), iou_threshold=iou_thres)
@@ -124,9 +118,9 @@ def evaluate_multiview(dataset, model, iou_thres, conf_thres, weak_conf_thres, n
                             detections.append({
                                 "image_group_id": img_group_id,
                                 "file_name": img_path[i].rsplit('/', 1)[1],
-                                "category_id": dataset._c[int(d[-1])],
+                                "category_id": dataset.class_indices[int(d[-1])],
                                 "bbox": [d[0], d[1], d[2] - d[0], d[3] - d[1]],
-                                "score": d[-2]
+                                "score": d[4] * d[5]
                             })
 
     # Concatenate sample statistics
@@ -142,7 +136,7 @@ def evaluate_multiview(dataset, model, iou_thres, conf_thres, weak_conf_thres, n
 
 
 def evaluate_multiview_as_single_view(dataset, model, iou_thres, conf_thres, nms_thres, img_size,
-                       workers, views, bs=1, return_detections=False):
+                                      workers, views, bs=1, return_detections=False):
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=bs, shuffle=False,
         num_workers=workers,
@@ -166,7 +160,7 @@ def evaluate_multiview_as_single_view(dataset, model, iou_thres, conf_thres, nms
                 im = im_group[j]
                 im.requires_grad = False
                 sv_imgs.append(im)
-                im_targets = targets[targets[:,:, 0] == i].view(-1, len(views), 6)
+                im_targets = targets[targets[:, :, 0] == i].view(-1, len(views), 6)
                 view_targets = im_targets[:, j, :]
                 labels += view_targets[:, 1].tolist()
                 view_targets[:, 2:] = xywh2xyxy(view_targets[:, 2:])

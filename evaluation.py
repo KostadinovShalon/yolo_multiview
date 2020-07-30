@@ -123,7 +123,7 @@ class DetectionPerformanceEvaluation:
 
 def build_params():
     params = Params(iouType='bbox')
-    params.maxDets = [1, 100, 500]
+    params.maxDets = [1, 10, 100]
     params.areaRng = [[0 ** 2, 1e5 ** 2], [0 ** 2, 32 ** 2], [32 ** 2, 96 ** 2], [96 ** 2, 1e5 ** 2]]
     params.areaRngLbl = ['all', 'small', 'medium', 'large']
     params.useCats = 1

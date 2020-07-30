@@ -60,7 +60,7 @@ class YOLOLayer(nn.Module):
         # Calculate offsets for each grid
         self.grid_x = torch.arange(g).repeat(g, 1).view([1, 1, g, g]).type(FloatTensor)
         self.grid_y = torch.arange(g).repeat(g, 1).t().view([1, 1, g, g]).type(FloatTensor)
-        self.scaled_anchors = FloatTensor([(a_w / self.stride, a_h / self.stride) for a_w, a_h in self.anchors])
+        self.scaled_anchors = torch.tensor([(a_w / self.stride, a_h / self.stride) for a_w, a_h in self.anchors])
         self.anchor_w = self.scaled_anchors[:, 0:1].view((1, self.num_anchors, 1, 1))
         self.anchor_h = self.scaled_anchors[:, 1:2].view((1, self.num_anchors, 1, 1))
 
@@ -462,23 +462,23 @@ class YOLOv3(nn.Module):
         ptr = self.load_conv_layer(self.features_extractor.c1[0], ptr, weights, self.features_extractor.c1[1])
         ptr = self.load_conv_layer(self.features_extractor.c2[0], ptr, weights, self.features_extractor.c2[1])
         for residual_block in self.features_extractor.r1:
-            for i in range(0, len(residual_block), 3):
+            for i in range(0, residual_block.size(0), 3):
                 ptr = self.load_conv_layer(residual_block[i], ptr, weights, residual_block[i + 1])
         ptr = self.load_conv_layer(self.features_extractor.c3[0], ptr, weights, self.features_extractor.c3[1])
         for residual_block in self.features_extractor.r2:
-            for i in range(0, len(residual_block), 3):
+            for i in range(0, residual_block.size(0), 3):
                 ptr = self.load_conv_layer(residual_block[i], ptr, weights, residual_block[i + 1])
         ptr = self.load_conv_layer(self.features_extractor.c4[0], ptr, weights, self.features_extractor.c4[1])
         for residual_block in self.features_extractor.r3:
-            for i in range(0, len(residual_block), 3):
+            for i in range(0, residual_block.size(0), 3):
                 ptr = self.load_conv_layer(residual_block[i], ptr, weights, residual_block[i + 1])
         ptr = self.load_conv_layer(self.features_extractor.c5[0], ptr, weights, self.features_extractor.c5[1])
         for residual_block in self.features_extractor.r4:
-            for i in range(0, len(residual_block), 3):
+            for i in range(0, residual_block.size(0), 3):
                 ptr = self.load_conv_layer(residual_block[i], ptr, weights, residual_block[i + 1])
         ptr = self.load_conv_layer(self.features_extractor.c6[0], ptr, weights, self.features_extractor.c6[1])
         for residual_block in self.features_extractor.r5:
-            for i in range(0, len(residual_block), 3):
+            for i in range(0, residual_block.size(0), 3):
                 ptr = self.load_conv_layer(residual_block[i], ptr, weights, residual_block[i + 1])
 
         current_ptr = ptr

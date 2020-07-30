@@ -1,9 +1,8 @@
 import copy
-from itertools import permutations
+import scipy.special
 
 import numpy as np
 import torch
-from markdown.util import deprecated
 
 
 def rescale_boxes(boxes, current_dim, original_shape, normalized=False, xywh=False):
@@ -129,7 +128,7 @@ def build_targets(pred_boxes: torch.Tensor, pred_cls: torch.Tensor, target: torc
     Gets the masks for the actual targets in the channel with the best suited anchor box. It also gets a mask
     where there is no predicted object. However, if a "no best anchor" channel has a bigger IOU than the
     specified anchor, it is also considered an object (thus, the no obj mask gets to 0 for that anchor channel).
-    :param pred_boxes: predicted boxes, containing the x, y, w and h values in that order.
+    :param pred_boxes: predicted boxes, containing the center x, center y, w and h values in that order.
                        It must be a tensor with the following dimensions: samples x anchors x grid_w x grid_h x 4
     :param pred_cls: predicted classes tensor, with dimensions: samples x anchors x grid_w x grid_h x classes
     :param target: actual targets tensor, with dimensions: target_boxes x 6. The second dimensions of 6-dim vector
@@ -159,24 +158,23 @@ def build_targets(pred_boxes: torch.Tensor, pred_cls: torch.Tensor, target: torc
                         with float type.
     """
 
-    byte_tensor = torch.cuda.ByteTensor if pred_boxes.is_cuda else torch.ByteTensor
-    float_tensor = torch.cuda.FloatTensor if pred_boxes.is_cuda else torch.FloatTensor
-
     n_b = pred_boxes.size(0)
     n_a = pred_boxes.size(1)
     n_c = pred_cls.size(-1)
     n_g = pred_boxes.size(2)
 
+    device = pred_boxes.device
+
     # Output tensors
-    obj_mask = byte_tensor(n_b, n_a, n_g, n_g).fill_(0)
-    noobj_mask = byte_tensor(n_b, n_a, n_g, n_g).fill_(1)
-    class_mask = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
-    iou_scores = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
-    tx = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
-    ty = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
-    tw = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
-    th = float_tensor(n_b, n_a, n_g, n_g).fill_(0)
-    tcls = float_tensor(n_b, n_a, n_g, n_g, n_c).fill_(0)
+    obj_mask = torch.zeros((n_b, n_a, n_g, n_g), dtype=torch.uint8, device=device)
+    noobj_mask = torch.ones((n_b, n_a, n_g, n_g), dtype=torch.uint8, device=device)
+    class_mask = torch.zeros((n_b, n_a, n_g, n_g), device=device)
+    iou_scores = torch.zeros((n_b, n_a, n_g, n_g), device=device)
+    tx = torch.zeros((n_b, n_a, n_g, n_g), device=device)
+    ty = torch.zeros((n_b, n_a, n_g, n_g), device=device)
+    tw = torch.zeros((n_b, n_a, n_g, n_g), device=device)
+    th = torch.zeros((n_b, n_a, n_g, n_g), device=device)
+    tcls = torch.zeros((n_b, n_a, n_g, n_g, n_c), device=device)
 
     if target.shape[0] > 0:
         # Convert to position relative to box
@@ -219,7 +217,7 @@ def non_max_suppression(prediction, conf_thres=0.5, nms_thres=0.4):
     """
     Removes detections with lower object confidence score than 'conf_thres' and performs
     Non-Maximum Suppression to further filter detections.
-    :param prediction: tensor with the predictions. Last dimension must be a (5 + Classes)
+    :param prediction: predictions tensor. Last dimension must be a (5 + Classes)
     :param conf_thres: Confidence threshold for bounding boxes
     :param nms_thres: Non maximum supression threshold
     :return: detections with shape:
@@ -227,78 +225,23 @@ def non_max_suppression(prediction, conf_thres=0.5, nms_thres=0.4):
     """
 
     prediction[..., :4] = xywh2xyxy(prediction[..., :4])
-    output = [None for _ in range(len(prediction))]
+    output = []
     for image_i, image_pred in enumerate(prediction):
         keep_boxes = nms(conf_thresholding(image_pred, conf_thres), nms_thres)
-        if keep_boxes:
-            output[image_i] = torch.stack(keep_boxes)
+        output.append(keep_boxes if keep_boxes else None)
 
     return output
 
 
-@deprecated
-def mv_non_max_suppression(mv_prediction, fundamental_matrices,
-                           conf_thres=0.5, weak_conf_thres=0.4, nms_thres=0.4, distance_margin=20):
-    """
-    Removes detections with lower object confidence score than 'conf_thres' and performs
-    Non-Maximum Suppression to further filter detections.
-    :param distance_margin: distance from the epipolar line margin
-    :param weak_conf_thres: weak confidence threshold
-    :param fundamental_matrices: fundamental matrices dictionary of tuples
-    :param mv_prediction: tensor with multi-view predictions. Last dimension must be a (5 + Classes)
-    :param conf_thres: Confidence threshold for bounding boxes
-    :param nms_thres: Non maximum supression threshold
-    :return: detections with shape:
-        (x1, y1, x2, y2, object_conf, class_score, class_pred)
-    """
-    for k in mv_prediction.keys():
-        mv_prediction[k][..., :4] = xywh2xyxy(mv_prediction[k][..., :4])
-    views = mv_prediction.keys()
-    output = {k: [[] for _ in range(len(v))] for k, v in mv_prediction.items()}
-    for k, preds in mv_prediction.items():
-        for image_i, image_pred in enumerate(preds):
-            keep_boxes = nms(conf_thresholding(image_pred, conf_thres), nms_thres)  # list of detected tensors
-            if keep_boxes:
-                for v in views:
-                    if v != k:
-                        if len(keep_boxes) == 0:
-                            continue
-                        f = fundamental_matrices[(k, v)][0]
-                        weak_preds = weak_detection(src_preds=keep_boxes,
-                                                    dst_preds=mv_prediction[v][image_i],
-                                                    score_th=weak_conf_thres,
-                                                    fundamental_matrix=f,
-                                                    distance_margin=distance_margin,
-                                                    nms_th=nms_thres)
-                        valid_preds = []
-                        for kb, wp in zip(keep_boxes, weak_preds):
-                            if wp is not None:
-                                valid_preds.append(kb)
-                        keep_boxes = [kb for kb, wp in zip(keep_boxes, weak_preds) if wp is not None]
-                        weak_preds = [wp for wp in weak_preds if wp is not None]
-                        if len(weak_preds) > 0:
-                            # noinspection PyTypeChecker
-                            output[v][image_i].append(torch.stack(weak_preds))
-                if len(keep_boxes) > 0:
-                    pass
-                    # output[k][image_i].append(torch.stack(keep_boxes))
-    # TO DO cambiar el orden del diccionario
-    output = {
-        v: [torch.stack(nms(torch.cat(view_outputs), nms_thres)) if len(view_outputs) else None for view_outputs in
-            output[v]] for v in views}
-    return output
-
-
-def mv_filtering(mv_prediction, fundamental_matrices,
-                 conf_thres=0.5, weak_conf_thres=0.4, nms_thres=0.4):
+def mv_filtering(mv_prediction, fundamental_matrices, conf_thres=0.5, nms_thres=0.4, p_value=0.95):
     """
     Removes detections with lower object confidence score than 'conf_thres' and performs
     Non-Maximum Suppression to further filter detections.
     :param fundamental_matrices: fundamental matrices dictionary of tuples
-    :param weak_conf_thres: weak confidence threshold
     :param mv_prediction: tensor with multi-view predictions. Last dimension must be a (5 + Classes)
     :param conf_thres: Confidence threshold for bounding boxes
     :param nms_thres: Non maximum supression threshold
+    :param p_value: P-value to search bounding boxes near the epipolar line
     :return: detections with shape:
         (x1, y1, x2, y2, object_conf, class_score, class_pred)
     """
@@ -315,28 +258,30 @@ def mv_filtering(mv_prediction, fundamental_matrices,
                 detections_by_view = {k: weakly_filtered}
                 for v in mv_preds.keys():
                     if v != k:
-                        f, u, s = fundamental_matrices[(k, v)]
-                        detections_by_view[v] = weak_detection2(src_preds=detections_by_view[k],
-                                                                dst_preds=reordered_preds[i][v],
-                                                                conf_th=weak_conf_thres,
-                                                                filter_th=0.3,
-                                                                fundamental_matrix=f,
-                                                                nms_th=nms_thres,
-                                                                error=u,
-                                                                std=s)  # Best matching box in dst view
-                for j in range(detections_by_view[k].shape[0]):
+                        keys = list(fundamental_matrices.keys())
+                        categories = list(set(tuple(zip(*keys))[-1]))
+                        categories.sort()
+                        f = [fundamental_matrices[(k, v, c)] for c in categories]
+                        detections_by_view[v] = weak_detection(src_preds=weakly_filtered,
+                                                               dst_preds=reordered_preds[i][v],
+                                                               filter_th=conf_thres * (1 - p_value),
+                                                               fundamental_matrices=f,
+                                                               nms_th=nms_thres)  # Best matching box in dst view
+                for j in range(weakly_filtered.shape[0]):
                     # is_valid = True
                     found = 0
                     for v in views:
                         if detections_by_view[v][j] is None:
                             found += 1
-                    if found < len(views) / 2:
+                    if found < len(views) - 1:
                         d = {v: detections_by_view[v][j] for v in views}
-                        d["cat"] = int(detections_by_view[k][j][-1])
+                        d["cat"] = int(weakly_filtered[j][-1])
                         d["combined_score"] = 1
                         for v in views:
                             if detections_by_view[v][j] is not None:
                                 d["combined_score"] *= detections_by_view[v][j][4] * detections_by_view[v][j][5]
+                            else:
+                                d["combined_score"] *= 1 - found / (len(views) / 2)
                         valid_pairs.append(d)
         # Removing overlaps
         if len(valid_pairs) > 0:
@@ -348,29 +293,6 @@ def mv_filtering(mv_prediction, fundamental_matrices,
                     score = p[:, 4] * p[:, 5]
                     p = p[(-score).argsort()]
                     output[v][i].extend(nms(p, nms_thres))
-            # cats = set(d["cat"] for d in valid_pairs)
-            # for cat in cats:
-            #     dets_by_cat = [d for d in valid_pairs if d["cat"] == cat]
-            #     sorted_dets = sorted(dets_by_cat, key=lambda det: det["combined_score"], reverse=True)
-            #     while len(sorted_dets) > 0:
-            #         best_det = sorted_dets[0]
-            #         new_sorted = []
-            #         for det in sorted_dets[1:]:
-            #             overlaps = False
-            #             for v in views:
-            #                 if det[v] is not None and best_det[v] is not None:
-            #                     if bbox_iou(best_det[v].unsqueeze(0), det[v].unsqueeze(0)).squeeze().item()
-            #                     >= nms_thres:
-            #                         overlaps = True
-            #                         break
-            #             if not overlaps:
-            #                 new_sorted.append(det)
-            #             else:
-            #                 for v in views:
-            #                     best_det[v] = nms(torch.stack((best_det[v], det[v])), nms_thres)[0]
-            #         sorted_dets = new_sorted
-            #         for v in views:
-            #             output[v][i].append(best_det[v])
 
     output = {
         v: [torch.stack(view_outputs) if len(view_outputs) else None for view_outputs in output[v]] for v in views}
@@ -412,7 +334,7 @@ def score_thresholding(raw_preds, score_thres, aimed_class=None):
     Score (confidence x class_confidence) thresholding of predictions
     :param raw_preds: N x (5 + classes) predictions tensor. Format: x, y, w, h, conf, class_1_conf, class_2_conf, ...
     :param score_thres: score threshold
-    :param true_cls: if the true class is given, the confidence for that class is used. If -1, all class_confidences
+    :param aimed_class: if the true class is given, the confidence for that class is used. If -1, all class_confidences
     are considered. If None, the maximum class confidence is used
     :return: Thresholded N x 7 predictions tensor with the format x, y, w, h, conf, class_conf, class_id
     """
@@ -474,63 +396,44 @@ def nms(dets, nms_thres):
     return keep_boxes
 
 
-@deprecated
-def weak_detection(src_preds, dst_preds, score_th, fundamental_matrix, distance_margin, nms_th):
-    # Filter out confidence scores below threshold
-    src_centres = copy.deepcopy(torch.stack(src_preds))
-    src_centres[..., :4] = xyxy2xywh(src_centres[..., :4])
-    src_centres = np.concatenate((src_centres[:, :2], np.ones((len(src_centres), 1))), axis=1)
-    epilines = fundamental_matrix @ src_centres.transpose()
-
-    weaks = [None] * len(src_centres)
-
-    for i, (src_centre, src_pred, epiline) in enumerate(zip(src_centres, src_preds, epilines.transpose())):
-        src_class = src_pred[-1].cpu().long().item()
-        dst_dets = score_thresholding(dst_preds, score_th, src_class)
-        if dst_dets is None:
-            continue
-        A, B, C = epiline[0], epiline[1], epiline[2]
-        x = (dst_dets[:, 0] + dst_dets[:, 2]) / 2
-        y = (dst_dets[:, 1] + dst_dets[:, 3]) / 2
-        d = np.abs(A * x + B * y + C) / np.sqrt(A ** 2 + B ** 2)
-        valid_weak_preds = dst_dets[np.bitwise_and(d < distance_margin, dst_dets[:, -1].squeeze() == src_class) != 0]
-        # If none are remaining => process next image
-        if not valid_weak_preds.size(0):
-            continue
-        # Object confidence times class confidence
-        # valid_weak_preds = torch.stack(nms(valid_weak_preds, nms_thres))
-        # score = valid_weak_preds[:, 4] * valid_weak_preds[:, 5]
-        # # Sort by it
-        # valid_weak_preds = valid_weak_preds[(-score).argsort()]
-        valid_weak_preds = torch.stack(nms(valid_weak_preds, nms_th))
-        score = valid_weak_preds[:, 4] * valid_weak_preds[:, 5]
-        # Sort by it
-        valid_weak_preds = valid_weak_preds[(-score).argsort()]
-        weaks[i] = valid_weak_preds[0]
-    return weaks
-
-
-def weak_detection2(src_preds, dst_preds, conf_th, filter_th, fundamental_matrix, error, std, nms_th):
+def weak_detection(src_preds, dst_preds, filter_th, fundamental_matrices, nms_th):
+    """
+    Filters bounding boxes by confidence threshold and epipolar constraints given some src detections in one view
+    and raw detections in the desired filtered view.
+    :param src_preds: list with 7-dimensional tensors with the format: [x1, y1, x2, y2, conf, class_conf, class]
+    :param dst_preds: raw Nx(5 + classes) tensor with the format [x1, y1, x2, y2, conf, class1_conf, class_cof, ...]
+    :param filter_th: threshold probability for epipolar filtering
+    :param fundamental_matrices: a dictionary of fundamental matrix triplets (fundamental_matrix, mean, std) where
+    the key value is the source class.
+    :param nms_th: non-maximum supression threshold
+    :return: list with the same size as src_preds with the filtered tensors of bounding boxes. If no bound box was
+    found in the destination view, a None value is assigned.
+    """
     # Filter out confidence scores below threshold
     src_centres = copy.deepcopy(src_preds)
     src_centres[..., :4] = xyxy2xywh(src_centres[..., :4])
     src_centres = np.concatenate((src_centres[:, :2], np.ones((len(src_centres), 1))), axis=1)
-    epilines = fundamental_matrix @ src_centres.transpose()
+    # epilines = fundamental_matrix @ src_centres.transpose()
 
-    weaks = [None] * len(src_centres)
+    weaks = []
 
-    for i, (src_centre, src_pred, epiline) in enumerate(zip(src_centres, src_preds, epilines.transpose())):
+    for i, (src_centre, src_pred) in enumerate(zip(src_centres, src_preds)):
         src_class = src_pred[-1].cpu().long().item()
-        dst_dets = conf_thresholding(dst_preds, conf_th, src_class)
+        dst_dets = conf_thresholding(dst_preds, 1e-2, src_class)
         if dst_dets is None:
+            weaks.append(None)
             continue
+        f, error, std = fundamental_matrices[src_class]
+        epiline = f @ src_centre.transpose()
         A, B, C = epiline[0], epiline[1], epiline[2]
         x = (dst_dets[:, 0] + dst_dets[:, 2]) / 2
         y = (dst_dets[:, 1] + dst_dets[:, 3]) / 2
-        d = np.abs(A * x + B * y + C) / np.sqrt(A ** 2 + B ** 2)
+        d = (A * x + B * y + C) / np.sqrt(A ** 2 + B ** 2)
         distance_probs = prob_by_distance(d, error, std)
         dst_dets[:, 4] = dst_dets[:, 4] * distance_probs
         score_with_distance = dst_dets[:, 4] * dst_dets[:, 5]
+        import warnings
+        warnings.filterwarnings("ignore", category=UserWarning)
         valid_weak_preds = dst_dets[score_with_distance > filter_th]
         # If none are remaining => process next image
         if not valid_weak_preds.size(0):
@@ -540,24 +443,16 @@ def weak_detection2(src_preds, dst_preds, conf_th, filter_th, fundamental_matrix
         score_with_distance = valid_weak_preds[:, 4] * valid_weak_preds[:, 5]
         valid_weak_preds = valid_weak_preds[(-score_with_distance).argsort()]
         valid_weak_preds = torch.stack(nms(valid_weak_preds, nms_th))
-        weaks[i] = valid_weak_preds[0]
+        weaks.append(valid_weak_preds[0])
     return weaks
 
 
-def prob_by_distance(distance, error, std, delta=0.99, gamma=0.67):
-    k = np.log(delta * (1 - gamma) / (gamma * (1 - delta))) / std
-    d0 = std * np.log(delta / (1 - delta)) / (np.log(delta / (1 - delta)) - np.log(gamma / (1 - gamma))) + error
-    return 1 - 1 / (1 + np.exp(-k * (distance - d0)))
-
-
-def remove_not_projected_boxes(predicted_boxes, projected_boxes, jaccard=0.5):
-    valid_predicted_boxes = []
-
-    for predicted_box in predicted_boxes:
-        projection_overlaps = bbox_iou(predicted_box[:4].unsqueeze(0), projected_boxes[:, :4], x1y1x2y2=False) > jaccard
-        label_match = predicted_box[-1] == projected_boxes[:, -1]
-
-        valid_overlap = projection_overlaps & label_match
-        if len(projected_boxes[valid_overlap]) > 0:
-            valid_predicted_boxes.append(predicted_box)
-    return torch.stack(valid_predicted_boxes) if len(valid_predicted_boxes) > 0 else None
+def prob_by_distance(distance, error, std):
+    """
+    Epipolar probability
+    :param distance: distance from the point to the epipolar line
+    :param error: mean of the error
+    :param std: standard deviation of the error
+    :return: the value of 1 - erf(| distance - error | / (sqrt(2) * std) )
+    """
+    return scipy.special.erfc(np.abs(distance - error) / (np.sqrt(2) * std))
