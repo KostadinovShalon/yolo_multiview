@@ -171,7 +171,7 @@ def detect_singleview(model, parser, views=None, classes=None):
             break
 
 
-def detect_multiview(model, dataset, f_matrices, parser, p_value=0.95):
+def detect_multiview(model, dataset, f_matrices, parser):
     annotations = None
     classes = parser.inference["classes"]
     if parser.inference["annotation_file"] is not None:
@@ -222,7 +222,8 @@ def detect_multiview(model, dataset, f_matrices, parser, p_value=0.95):
             view_targets[:, 2:] = xywh2xyxy(view_targets[:, 2:])
             view_targets[:, 2:] *= parser.img_size
 
-        detections = mv_filtering(view_outputs, f_matrices, conf_thres=parser.inference["conf_thres"], p_value=p_value,
+        detections = mv_filtering(view_outputs, f_matrices, conf_thres=parser.inference["conf_thres"],
+                                  p_value=parser.inference["p_value"],
                                   nms_thres=parser.inference["nms_thres"])
 
         for j, v_img_paths in enumerate(img_paths):

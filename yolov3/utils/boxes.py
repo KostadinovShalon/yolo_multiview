@@ -228,7 +228,7 @@ def non_max_suppression(prediction, conf_thres=0.5, nms_thres=0.4):
     output = []
     for image_i, image_pred in enumerate(prediction):
         keep_boxes = nms(conf_thresholding(image_pred, conf_thres), nms_thres)
-        output.append(keep_boxes if keep_boxes else None)
+        output.append(torch.stack(keep_boxes) if keep_boxes else None)
 
     return output
 
@@ -437,6 +437,7 @@ def weak_detection(src_preds, dst_preds, filter_th, fundamental_matrices, nms_th
         valid_weak_preds = dst_dets[score_with_distance > filter_th]
         # If none are remaining => process next image
         if not valid_weak_preds.size(0):
+            weaks.append(None)
             continue
         # Object confidence times class confidence
         # Sort by it

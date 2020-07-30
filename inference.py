@@ -1,10 +1,11 @@
+import argparse
 import json
 from itertools import permutations
 
 import torch.utils.data
 
 from yolov3.datasets import MVCOCODataset
-from yolov3.detect import detect_singleview, detect_multiview, detect_oneset_multiview
+from yolov3.detect import detect_singleview, detect_multiview
 from yolov3.epipolar_geometry import compute_fundamental_matrix
 from yolov3.utils.parser import get_parser_from_arguments
 from yolov3.yolo import YOLOv3
@@ -13,9 +14,10 @@ import numpy as np
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def inference_single_view(parser, views=("A", "B")):
+def inference_single_view(parser):
 
     print("Runnning Inference")
+    views = parser.views
     # Initiate model
     classes = ["firearm", "laptop", "knife", "camera"]
     model = YOLOv3(len(classes), anchors=parser.anchors, img_size=parser.img_size).to(device)
@@ -27,19 +29,18 @@ def inference_single_view(parser, views=("A", "B")):
         classes)
 
 
-def inference_multi_view(parser, views=("A", "B"), f_matrices=None):
+def inference_multi_view(parser, f_matrices=None):
     """
     Performs inference on a multi-view data set
     :param parser: parser object
-    :param views:
     :param f_matrices:
     :return:
     """
     print("Getting Fundamental Matrices")
-    with open(parser.train["annotation_file"], 'r') as f:
-        coco = json.load(f)
+    views = parser.views
     perms = permutations(views, 2)
     if f_matrices is None:
+        coco = json.load(open(parser.train["annotation_file"], 'r'))
         f_matrices = {perm: compute_fundamental_matrix(coco, *perm) for perm in perms}
 
     print("Runnning Test")
@@ -53,26 +54,26 @@ def inference_multi_view(parser, views=("A", "B"), f_matrices=None):
 
     # Initiate model
     model = YOLOv3(len(dataset.classes), anchors=parser.anchors).to(device)
-    detect_multiview(model, dataset, f_matrices, parser, weak_conf_th=0.01, score_th=0.3)
+    detect_multiview(model, dataset, f_matrices, parser)
 
-
-def inference_oneimage_multi_view(views=("A", "C")):
-    parser = get_parser_from_arguments()
-    print("Getting Fundamental Matrices")
-    f_matrices = get_matrices()
-
-    image_a_path = '/home/brian/Documents/datasets/new_smith_full/images/BAGGAGE_20140127_134711_68622_A.jpg'
-    image_b_path = '/home/brian/Documents/datasets/new_smith_full/images/BAGGAGE_20140127_134711_68622_C.jpg'
-
-    keys = list(f_matrices.keys())
-    categories = list(set(tuple(zip(*keys))[-1]))
-    categories.sort()
-    f = [f_matrices[(views[0], views[1], c)] for c in categories]
-    f2 = [f_matrices[(views[1], views[0], c)] for c in categories]
-
-    # Initiate model
-    model = YOLOv3(4, anchors=parser.anchors).to(device)
-    detect_oneset_multiview(model, views, f, f2, parser, image_a_path, image_b_path)
+#
+# def inference_oneimage_multi_view(views=("A", "C")):
+#     parser = get_parser_from_arguments()
+#     print("Getting Fundamental Matrices")
+#     f_matrices = get_matrices()
+#
+#     image_a_path = '/home/brian/Documents/datasets/new_smith_full/images/BAGGAGE_20140127_134711_68622_A.jpg'
+#     image_b_path = '/home/brian/Documents/datasets/new_smith_full/images/BAGGAGE_20140127_134711_68622_C.jpg'
+#
+#     keys = list(f_matrices.keys())
+#     categories = list(set(tuple(zip(*keys))[-1]))
+#     categories.sort()
+#     f = [f_matrices[(views[0], views[1], c)] for c in categories]
+#     f2 = [f_matrices[(views[1], views[0], c)] for c in categories]
+#
+#     # Initiate model
+#     model = YOLOv3(4, anchors=parser.anchors).to(device)
+#     detect_oneset_multiview(model, views, f, f2, parser, image_a_path, image_b_path)
 
 
 def get_matrices():
@@ -271,8 +272,15 @@ def get_matrices():
 
 
 if __name__ == '__main__':
-    p = get_parser_from_arguments()
-    # inference_multi_view(p, views=("A", "B", "C", "D"), f_matrices=get_matrices())
-    # inference_single_view(p, views=("A", "B", "C", "D"))#
-    inference_oneimage_multi_view()
-
+    args = argparse.ArgumentParser()
+    args.add_argument("--gt_path", help="YAML Config file path")
+    args.add_argument("--type", choices=["sv", "mv"],
+                      help="Testing type: mv (default_ for multi-view and sv for single-view", default="mv")
+    p, opt = get_parser_from_arguments(args)
+    gt_path = opt.gt_path
+    if opt.type == "sv":
+        inference_single_view(p)
+    elif opt.type == "mv":
+        inference_multi_view(p, f_matrices=get_matrices())
+    else:
+        raise ValueError(f"Invalid mode {opt.type}")

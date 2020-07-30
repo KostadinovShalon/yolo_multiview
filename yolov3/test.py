@@ -74,7 +74,7 @@ def evaluate_singleview(dataset, model, iou_thres, conf_thres, nms_thres, img_si
         return evaluation_loss, p, r, ap, f1, ap_class
 
 
-def evaluate_multiview(dataset, model, iou_thres, conf_thres, weak_conf_thres, nms_thres, img_size, score_th,
+def evaluate_multiview(dataset, model, iou_thres, conf_thres, nms_thres, img_size, p_value,
                        workers, f_matrices, views, bs=1, return_detections=False):
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=bs, shuffle=False,
@@ -103,7 +103,7 @@ def evaluate_multiview(dataset, model, iou_thres, conf_thres, weak_conf_thres, n
                 view_targets[:, 2:] *= img_size
 
         view_outputs = mv_filtering(view_outputs, f_matrices, conf_thres=conf_thres,
-                                    nms_thres=nms_thres, score_th=score_th)
+                                    nms_thres=nms_thres, p_value=p_value)
         for i, v in enumerate(views):
             if targets.shape[0] > 0:
                 sample_metrics += get_batch_statistics(view_outputs[v], targets[:, i, :].cpu(), iou_threshold=iou_thres)

@@ -5,8 +5,9 @@ import os
 from datetime import datetime
 
 
-def get_parser_from_arguments():
-    args = argparse.ArgumentParser()
+def get_parser_from_arguments(args=None):
+    if args is None:
+        args = argparse.ArgumentParser()
     args.add_argument("--config_file", help="YAML Config file path")
     args.add_argument("--output_folder", help="Output folder where experiments are saved")
     args.add_argument("--experiment_name", help="Name of the experiment")
@@ -22,7 +23,7 @@ def get_parser_from_arguments():
     if opt.model_path and parser.inference:
         parser.inference["weights_file"] = opt.model_path
     parser.create_folders()
-    return parser
+    return parser, opt
 
 
 class ConfigParser:
@@ -64,6 +65,7 @@ class ConfigParser:
         self.test = self.get_or_default("test")
         self.inference = self.get_or_default("inference")
         self.visdom = self.get_or_default("visdom")
+        self.views = tuple(self.get_or_default("views"))
 
     def get_or_default(self, key, default=None):
         return (self._config[key] if key in self._config else default) if self._config else default

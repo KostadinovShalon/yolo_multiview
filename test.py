@@ -1,4 +1,6 @@
+import argparse
 import json
+import os
 from itertools import permutations
 
 import numpy as np
@@ -6,7 +8,7 @@ import torch
 import torch.utils.data
 
 import evaluation
-from yolov3.datasets import COCODataset, MVCOCODataset, COCODatasetFromMV
+from yolov3.datasets import MVCOCODataset, COCODatasetFromMV
 from yolov3.epipolar_geometry import compute_fundamental_matrix
 from yolov3.test import evaluate_singleview, evaluate_multiview
 from yolov3.utils.parser import get_parser_from_arguments
@@ -15,50 +17,9 @@ from yolov3.yolo import YOLOv3
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def test_single_view(parser, valid_views=None):
-    print("Runnning Test")
-    dataset = COCODataset(parser.test["dir"],
-                          annotations_file=parser.test["annotation_file"],
-                          augment=False,
-                          multiscale=False,
-                          normalized_labels=parser.test["normalized"],
-                          views=valid_views,
-                          img_size=parser.img_size,
-                          padding_value=1)
-    # Initiate model
-    model = YOLOv3(len(dataset.classes), anchors=parser.anchors).to(device)
+def test_multi_view(parser, f_matrices=None):
 
-    _, precision, recall, AP, f1, ap_class, detections = evaluate_singleview(
-        dataset,
-        model,
-        parser.test["iou_thres"],
-        parser.test["conf_thres"],
-        parser.test["nms_thres"],
-        parser.img_size,
-        parser.workers,
-        parser.test["weights_file"],
-        parser.test["batch_size"],
-        return_detections=True
-    )
-
-    for i, c in enumerate(ap_class):
-        print(f"+ Class '{c}' ({dataset.class_indices[c]}) - AP: {AP[i]} - precision: {precision[i]}"
-              f" - recall {recall[i]}")
-
-    print(f"mAP: {AP.mean()}")
-
-    return detections
-
-    # json_file_name = os.path.join(parser.db_name, parser.test["json_file_output"])
-    #
-    # with open(json_file_name, 'w') as f:
-    #     json.dump(detections, f)
-
-
-def test_multi_view(parser, views=("A", "B"), weak_th=0.01, score_th=0.3, f_matrices=None):
-    print("Getting Fundamental Matrices")
-    with open(parser.train["annotation_file"], 'r') as f:
-        coco = json.load(f)
+    views = parser.views
     perms = permutations(views, 2)
 
     print("Runnning Test")
@@ -71,6 +32,7 @@ def test_multi_view(parser, views=("A", "B"), weak_th=0.01, score_th=0.3, f_matr
                             padding_value=1)
 
     if f_matrices is None:
+        coco = json.load(open(parser.train["annotation_file"], 'r'))
         f_matrices = {tuple([*perm, c]): compute_fundamental_matrix(coco, *perm, img_size=parser.img_size, class_id=c)
                       for perm in perms for c in dataset.class_indices}
 
@@ -89,37 +51,21 @@ def test_multi_view(parser, views=("A", "B"), weak_th=0.01, score_th=0.3, f_matr
                                                                             model,
                                                                             parser.test["iou_thres"],
                                                                             parser.test["conf_thres"],
-                                                                            weak_th,
                                                                             parser.test["nms_thres"],
                                                                             parser.img_size,
-                                                                            score_th,
+                                                                            parser.test["p_value"],
                                                                             parser.workers,
                                                                             f_matrices,
                                                                             views,
                                                                             bs=parser.test["batch_size"],
                                                                             return_detections=True)
 
-    # for i, c in enumerate(ap_class):
-    #     print(f"+ Class '{c}' ({dataset.get_cat_by_positional_id(c)}) - AP: {AP[i]} - precision: {precision[i]}"
-    #           f" - recall {recall[i]}")
-    #
-    # print(f"mAP: {AP.mean()}")
-
     return detections
 
-    # json_file_name = os.path.join(parser.db_name, parser.test["json_file_output"])
-    #
-    # with open(json_file_name, 'w') as f:
-    #     json.dump(detections, f)
 
-
-def test_single_view2(parser, views=("A", "B")):
-    # with open(parser.train["annotation_file"], 'r') as f:
-    #     coco = json.load(f)
-    # perms = permutations(views, 2)
-    # f_matrices = {perm: compute_fundamental_matrix(coco, *perm) for perm in perms}
-
+def test_single_view(parser):
     print("Runnning Test")
+    views = parser.views
     dataset = COCODatasetFromMV(parser.test["dir"],
                                 annotations_file=parser.test["annotation_file"],
                                 multiscale=False,
@@ -154,21 +100,15 @@ def test_single_view2(parser, views=("A", "B")):
         return_detections=True
     )
 
-    # for i, c in enumerate(ap_class):
-    #     print(f"+ Class '{c}' ({dataset.get_cat_by_positional_id(c)}) - AP: {AP[i]} - precision: {precision[i]}"
-    #           f" - recall {recall[i]}")
-    #
-    # print(f"mAP: {AP.mean()}")
-
     return detections
-
-    # json_file_name = os.path.join(parser.db_name, parser.test["json_file_output"])
-    #
-    # with open(json_file_name, 'w') as f:
-    #     json.dump(detections, f)
 
 
 def get_matrices():
+    """
+    Fundamental matrices for ICPR 20 ms
+    :return: a dict of tuples, where the key is the tuple (src_view, dst_view, cls) and the values are the tuple
+    (fundamental matrix np.array, mu, sigma).
+    """
     return {('A', 'B', 1): (np.array([[-3.75529011e-08, -1.64293354e-07, -9.74453879e-03],
                                       [-3.74756394e-07, 1.34064598e-09, 1.57336122e-04],
                                       [9.93107299e-03, 3.36792723e-05, -6.13736306e-02]]), 0.03205558711190775,
@@ -364,30 +304,21 @@ def get_matrices():
 
 
 if __name__ == '__main__':
+    args = argparse.ArgumentParser()
+    args.add_argument("--gt_path", help="YAML Config file path")
+    args.add_argument("--type", choices=["sv", "mv"],
+                      help="Testing type: mv (default_ for multi-view and sv for single-view", default="mv")
+    p, opt = get_parser_from_arguments(args)
+    gt_path = opt.gt_path
+    if opt.type == "sv":
+        preds = test_single_view(p)
+    elif opt.type == "mv":
+        preds = test_multi_view(p, f_matrices=get_matrices())
+    else:
+        raise ValueError(f"Invalid mode {opt.type}")
     gt_path = "/home/brian/Documents/datasets/new_smith_full/db4_test.json"
-    p = get_parser_from_arguments()
-    preds = test_multi_view(p, ("A", "B", "C", "D"), f_matrices=get_matrices())
-    # preds = test_single_view2(p, ("A", "B", "C", "D"))
-    stats = evaluation.evaluate(gt_path, preds)
-    # print("Weak th = 0.001, score th = 0.3")
-    # preds = test_multi_view(p, ("A", "B", "C", "D"), weak_th=0.001, f_matrices=get_matrices())
-    # stats = evaluation.evaluate(gt_path, preds)
-    # print("Weak th = 0.1, score th = 0.3")
-    # preds = test_multi_view(p, ("A", "B", "C", "D"), weak_th=0.1, f_matrices=get_matrices())
-    # stats = evaluation.evaluate(gt_path, preds)
-    # print("Weak th = 0.01, score th = 0.2")
-    # preds = test_multi_view(p, ("A", "B", "C", "D"), weak_th=0.01, score_th=0.2, f_matrices=get_matrices())
-    # stats = evaluation.evaluate(gt_path, preds)
-    # print("Weak th = 0.01, score th = 0.1")
-    # preds = test_multi_view(p, ("A", "B", "C", "D"), weak_th=0.01, score_th=0.1, f_matrices=get_matrices())
-    # stats = evaluation.evaluate(gt_path, preds)
-    # print("Weak th = 0.01, score th = 0.4")
-    # preds = test_multi_view(p, ("A", "B", "C", "D"), weak_th=0.01, score_th=0.4, f_matrices=get_matrices())
-    # stats = evaluation.evaluate(gt_path, preds)
-    # print("Weak th = 0.01, score th = 0.5")
-    # preds = test_multi_view(p, ("A", "B", "C", "D"), weak_th=0.01, score_th=0.5, f_matrices=get_matrices())
-    # stats = evaluation.evaluate(gt_path, preds)
-    # json_file_name = os.path.join(parser.db_name, parser.test["json_file_output"])
-    #
-    # with open(json_file_name, 'w') as f:
-    #     json.dump(detections, f)
+    if gt_path:
+        evaluation.evaluate(gt_path, preds)
+
+    json_file_name = os.path.join(p.db_name, p.test["json_file_output"])
+    json.dump(preds, open(json_file_name, 'w'))
