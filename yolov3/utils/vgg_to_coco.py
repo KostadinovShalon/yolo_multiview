@@ -1,4 +1,5 @@
 """
+Script to convert VGG annotations to COCO
 Created on Thu Apr 25 2019
 @author: Brian Isaac-Medina
 

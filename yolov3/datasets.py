@@ -57,7 +57,10 @@ def _get_annotations(json_file):
 
 
 class _COCODataset(Dataset):
-
+    """
+    Generic class for a COCO-style Dataset. This should be changed to the pycocotools implementation of the COCO
+    dataset for a future release.
+    """
     def __init__(self, root: str,
                  annotations_file: str,
                  img_size=416,
@@ -72,12 +75,21 @@ class _COCODataset(Dataset):
         """
         Dataset for coco-annotated data
 
-        :param root: images root directory path
-        :param img_size: rescaled image size (int)
-        :param augment: boolean to apply data augmentation (horizontal flipping)
-        :param multiscale: boolean to use multi-scale
-        :param normalized_labels: indicates if labels in the annotation file are normalized
-        :param padding_value: padding value to add
+        :param root (str): images root directory path
+        :param annotations_file (str): coco (of mv-coco) annotations file
+        :param img_size (int): rescaled image size
+        :param augment (bool): indicates if data augmentation should be implemented (horizontal flipping). Default: True
+        :param multiscale (bool): indicates if multi-scale loading is used. Default: True
+        :param normalized_labels (bool): indicates if labels in the annotation file are normalized. Default: True
+        :param partition (str): partition of the data (train or val). If None, the entire dataset is taken.
+                                Default: None
+        :param val_split (float): If partition is defined, val_split defines the percentage of data for the validation
+                                  partition. Default: 0.2
+        :param seed (long): random seed for reproducibility. If partition is not None, the use of a seed is needed.
+                            Default: None
+        :param padding_value (int): padding value to add. Default: 1 (because we work with images with white background)
+        :param views (iterable): a list with the name of the views. For example, in our X-Ray experiments, we use
+                                    "A", "B", "C"... for each view. Default: None
         """
         self.root = root
         self.anns_file = annotations_file
@@ -299,7 +311,7 @@ class MVCOCODataset(_COCODataset):
                  partition=None,
                  val_split=0.2,
                  seed=None,
-                 padding_value=0):
+                 padding_value=1):
         super().__init__(root, annotations_file, img_size, False, multiscale, normalized_labels, partition,
                          val_split, seed, padding_value, views)
 
@@ -441,12 +453,7 @@ class COCODatasetFromMV(COCODataset):
                  padding_value=0,
                  views=None):
         """
-        Dataset for files with the structure
-
-        - root
-           |  - image1.jpg
-           |  - image2.jpg
-           |  - ...
+        Converts a MVCOCODataset to a COCODataset-like instance.
 
         :param root: root directory path where images are
         :param img_size: rescaled image size

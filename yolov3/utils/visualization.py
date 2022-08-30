@@ -55,7 +55,7 @@ def draw_detections(image_path, out_path, detections, classes, model_img_size,
     drawer = ImageDraw.Draw(image)
     im_w, im_h = image.size
 
-    font = ImageFont.load("arial.pil")
+    # font = ImageFont.load("arial.pil")
     if gt is not None:
         g = copy.deepcopy(gt)
         g[:, 2:6] = rescale_boxes(g[:, 2:6], model_img_size, (im_h, im_w), normalized=True, xywh=True)
@@ -63,11 +63,11 @@ def draw_detections(image_path, out_path, detections, classes, model_img_size,
             cls = classes[int(cls_idx)]
             color = colors[int(cls_idx)]
             w = x2 - x1
-            text_size = drawer.textsize(cls, font=font)
+            text_size = drawer.textsize(cls)
             x_centered = x1 - (text_size[0] - w) // 2
             drawer.rectangle([x1, y1, x2, y2], outline=color, width=3)
             if with_name:
-                drawer.text((x_centered, y2), cls, fill=color, font=font)
+                drawer.text((x_centered, y2), cls, fill=color)
 
     if detections is not None and len(detections) > 0:
         rescaled_detections = copy.deepcopy(detections)
@@ -76,11 +76,11 @@ def draw_detections(image_path, out_path, detections, classes, model_img_size,
             cls = classes[int(cls_pred)]
             color = colors[int(cls_pred)]
             w = x2 - x1
-            text_size = drawer.textsize(cls, font=font)
+            text_size = drawer.textsize(cls) # , font=font)
             x_centered = x1 - (text_size[0] - w) // 2
             drawer.rectangle([x1, y1, x2, y2], outline=color, width=3)
             if with_name:
-                drawer.text((x_centered, y1 - text_size[1]), cls, fill=color, font=font)
+                drawer.text((x_centered, y1 - text_size[1]), cls, fill=color) # , font=font)
 
     if epipoints is not None:
         rescaled_epipoints = np.concatenate((epipoints[:, :2], np.zeros((len(epipoints), 2))), axis=1)
@@ -93,3 +93,26 @@ def draw_detections(image_path, out_path, detections, classes, model_img_size,
             p1 = (im_w, -(epiline[2] + epiline[0] * im_w) / epiline[1])
             drawer.line([p0, p1], fill="red", width=1)
     image.save(out_path, "PNG")
+
+
+def plot_lines(x, y, vis, opts=None, env='main', win=None):
+    if isinstance(y, dict):
+        series = np.column_stack(list(y.values()))
+        legends = list(y.keys())
+    else:
+        series = y
+        legends = None
+
+    if opts is None:
+        opts = dict()
+    opts['legend'] = legends
+    plot_vals = dict(
+        X=x,
+        Y=series,
+        opts=opts,
+        env=env
+    )
+
+    if win is not None:
+        plot_vals['win'] = win
+    return vis.line(**plot_vals)

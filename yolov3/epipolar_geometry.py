@@ -11,6 +11,19 @@ from matplotlib import cm
 
 
 def get_src_and_dst_points(coco, src_view, dst_view, add_padding=True, img_size=None, with_id=False, class_id=None):
+    """
+    Gets the source and destination points from the bounding boxes of a mv-coco annotation file
+    :param coco: mv-coco annotation file
+    :param src_view: the name of the source view
+    :param dst_view: the name of the destination view
+    :param add_padding: if square padding is needed. Default: True
+    :param img_size: if different than None, this is the image size to rescale the points. Otherwise, it is in the
+                    [-1, 1] range (as per COCO annotations)
+    :param with_id: if img ids are to be returned
+    :param class_id: if not None, return only src and dst points from the selected class id
+    :return: a tuple of numpy arrays (of shape N x 2) with the src and dst points. If with_id is True, then an
+                additional array with the img ids is also returned
+    """
     dst = []
     src = []
     ids = []

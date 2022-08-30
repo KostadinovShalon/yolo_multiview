@@ -316,7 +316,7 @@ if __name__ == '__main__':
         preds = test_multi_view(p, f_matrices=get_matrices())
     else:
         raise ValueError(f"Invalid mode {opt.type}")
-    gt_path = "/home/brian/Documents/datasets/new_smith_full/db4_test.json"
+    gt_path = opt.gt_path
     if gt_path:
         evaluation.evaluate(gt_path, preds)
 

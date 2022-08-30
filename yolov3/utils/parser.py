@@ -65,7 +65,9 @@ class ConfigParser:
         self.test = self.get_or_default("test")
         self.inference = self.get_or_default("inference")
         self.visdom = self.get_or_default("visdom")
-        self.views = tuple(self.get_or_default("views"))
+        self.views = self.get_or_default("views")
+        if self.views is not None:
+            self.views = tuple(self.views)
 
     def get_or_default(self, key, default=None):
         return (self._config[key] if key in self._config else default) if self._config else default

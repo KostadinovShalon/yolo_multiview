@@ -1,0 +1,92 @@
+# Config File
+output_folder: "experiments"
+experiment_name: "db4_yolov3"
+views:
+  - A
+  - B
+  - C
+  - D
+
+workers: 4
+img_size: 544
+
+model:
+  anchors:
+    - [10, 13]
+    - [16, 30]
+    - [33, 23]
+    - [30, 61]
+    - [62, 45]
+    - [59, 119]
+    - [116, 90]
+    - [156, 198]
+    - [373, 326]
+
+test:
+  weights_file: "train_results/db4_yolov3/checkpoints/yolov3_ckpt_5.pth"
+  dir: "data/db4/images"
+  annotation_file: "data/db4_test_mv.json"
+  batch_size: 6
+  normalized: false
+  iou_thres: 0.5
+  nms_thres: 0.4
+  conf_thres: 0.5
+  p_value: 0.95
+  json_file_output: "yolov3_xray_sv.json"
+
+train:
+  dir: "data/db4/images"
+  annotation_file: "data/db4/db4_train.json"
+  val_dir: "data/db4/images"
+  val_annotation_file: "data/db4/db4_test.json"
+  val_split: ~
+  normalized: false
+  output_name: "yolov3_db4.pt"
+
+  epochs: 100
+  gradient_accumulations: 1
+  batch_size: 6
+  train_metrics_print_interval: 20
+  pretrained_weights: ~
+  checkpoint_interval: 5
+  evaluation_interval: 1
+  augment: true
+  compute_map: false  # if True computes mAP every tenth batch
+  multiscale_training: true # allow for multi-scale training
+  iou_thres: 0.5
+  nms_thres: 0.5
+  conf_thres: 0.5
+
+  optimizer:
+    # Possible values for type: "adam, sgd"
+    type: "adam"
+    lr: 0.0001
+    momentum: 0.9  # Only for SGD
+    decay: 0.00005
+    scheduler_milestones:
+      - 30
+      - 40
+    gamma: 0.1
+
+inference:
+  weights_file:  "train_results/db4_yolov3/checkpoints/yolov3_ckpt_5.pth"
+  dir: "data/db4/images"
+  annotation_file: "data/db4_test_mv.json"
+  normalized: false
+  with_gt: true
+  batch_size: 8
+  max_images: 20 # Number of maximum images to infer. If -1, infers all from inference directory
+  classes:
+    - firearm
+    - laptop
+    - knife
+    - camera
+  nms_thres: 0.4
+  conf_thres: 0.5
+  p_value: 0.95
+  save_structured: false
+
+visdom:
+  show: true
+  host: 'localhost'
+  port: 8097
